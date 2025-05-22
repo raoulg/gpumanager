@@ -122,6 +122,8 @@ class GPUInfo(BaseModel):
         else:
             self.update_status(GPUModelStatus.IDLE)
 
+        self.clear_reservation()
+
     def set_reservation(
         self, user_id: str, duration_minutes: int, model_name: Optional[str] = None
     ) -> None:
