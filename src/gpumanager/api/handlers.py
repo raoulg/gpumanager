@@ -2,8 +2,18 @@
 
 from typing import Any, Dict, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Path, status
-from fastapi.responses import StreamingResponse
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    Path,  # Add Request
+    Request,
+    status,
+)
+from fastapi.responses import (
+    JSONResponse,  # Add JSONResponse
+    StreamingResponse,
+)
 from loguru import logger
 from pydantic import BaseModel
 
@@ -119,6 +129,10 @@ class RequestHandler:
         app.post("/api/generate")(self._create_ollama_generate_handler())
         app.post("/api/chat")(self._create_ollama_chat_handler())
         app.post("/v1/chat/completions")(self._create_openai_chat_handler())
+        # Add this line in _create_app():
+        app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])(
+            self.ollama_passthrough
+        )
 
         return app
 
@@ -326,3 +340,41 @@ class RequestHandler:
             )
 
         return openai_chat_completions
+
+    async def ollama_passthrough(self, request: Request, path: str = Path(...)):
+        """Pass-through proxy for any Ollama API endpoint."""
+        try:
+            # Get any available GPU
+            available_gpu = None
+            for gpu in self.gpu_manager.gpus.values():
+                if gpu.status.value in ["idle", "model_ready"]:
+                    available_gpu = gpu
+                    break
+
+            if not available_gpu:
+                raise HTTPException(status_code=503, detail="No GPUs available")
+
+            # Get request body if present
+            body = None
+            if request.method in ["POST", "PUT", "PATCH"]:
+                try:
+                    body = await request.json()
+                except:
+                    pass
+
+            # Proxy the request
+            import httpx
+
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.request(
+                    method=request.method,
+                    url=f"http://{available_gpu.ip_address}:11434/api/{path}",
+                    json=body,
+                    headers={"Content-Type": "application/json"} if body else None,
+                )
+
+                return JSONResponse(response.json() if response.content else {})
+
+        except Exception as e:
+            logger.error(f"Error in passthrough for /api/{path}: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
