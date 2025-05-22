@@ -1,27 +1,27 @@
 """FastAPI request handlers."""
 
-from typing import Dict, Any, Optional
-from fastapi import FastAPI, HTTPException, status, Path, Depends
+from typing import Any, Dict, Optional
+
+from fastapi import Depends, FastAPI, HTTPException, Path, status
 from fastapi.responses import StreamingResponse
+from loguru import logger
 from pydantic import BaseModel
 
-from loguru import logger
-
-from gpumanager.cloud.api import CloudAPI
-from gpumanager.auth.manager import APIKeyManager
-from gpumanager.auth.models import AuthenticatedUser
 from gpumanager.api.middleware import (
     create_auth_dependency,
     create_optional_auth_dependency,
 )
-from gpumanager.gpu.manager import GPUManager
-from gpumanager.gpu.models import GPUManagerStats
-from gpumanager.api.ollama_proxy import OllamaProxy
 from gpumanager.api.ollama_models import (
-    OllamaGenerateRequest,
     OllamaChatRequest,
+    OllamaGenerateRequest,
     OpenAIChatRequest,
 )
+from gpumanager.api.ollama_proxy import OllamaProxy
+from gpumanager.auth.manager import APIKeyManager
+from gpumanager.auth.models import AuthenticatedUser
+from gpumanager.cloud.api import CloudAPI
+from gpumanager.gpu.manager import GPUManager
+from gpumanager.gpu.models import GPUManagerStats
 
 
 class HealthResponse(BaseModel):
@@ -289,40 +289,41 @@ class RequestHandler:
                 detail=f"Failed to pause GPU: {str(e)}",
             )
 
-    def _create_ollama_generate_handler(self):
-        """Create Ollama generate handler with proper dependency injection."""
 
-        async def ollama_generate(
-            request: OllamaGenerateRequest,
-            current_user: AuthenticatedUser = Depends(self.get_current_user),
-        ) -> StreamingResponse:
-            """Ollama generate endpoint with intelligent GPU routing."""
-            return await self.ollama_proxy.generate(request, current_user)
+def _create_ollama_generate_handler(self):
+    """Create Ollama generate handler with proper dependency injection."""
 
-        return ollama_generate
+    async def ollama_generate(
+        request: OllamaGenerateRequest,
+        current_user: AuthenticatedUser = Depends(self.get_current_user),
+    ) -> StreamingResponse:
+        """Ollama generate endpoint with intelligent GPU routing."""
+        return await self.ollama_proxy.generate(request, current_user)
 
-    def _create_ollama_chat_handler(self):
-        """Create Ollama chat handler with proper dependency injection."""
+    return ollama_generate
 
-        async def ollama_chat(
-            request: OllamaChatRequest,
-            current_user: AuthenticatedUser = Depends(self.get_current_user),
-        ) -> StreamingResponse:
-            """Ollama chat endpoint with intelligent GPU routing."""
-            return await self.ollama_proxy.chat(request, current_user)
 
-        return ollama_chat
+def _create_ollama_chat_handler(self):
+    """Create Ollama chat handler with proper dependency injection."""
 
-    def _create_openai_chat_handler(self):
-        """Create OpenAI chat handler with proper dependency injection."""
+    async def ollama_chat(
+        request: OllamaChatRequest,
+        current_user: AuthenticatedUser = Depends(self.get_current_user),
+    ) -> StreamingResponse:
+        """Ollama chat endpoint with intelligent GPU routing."""
+        return await self.ollama_proxy.chat(request, current_user)
 
-        async def openai_chat_completions(
-            request: OpenAIChatRequest,
-            current_user: AuthenticatedUser = Depends(self.get_current_user),
-        ) -> StreamingResponse:
-            """OpenAI-compatible chat completions endpoint."""
-            return await self.ollama_proxy.openai_chat_completions(
-                request, current_user
-            )
+    return ollama_chat
 
-        return openai_chat_completions
+
+def _create_openai_chat_handler(self):
+    """Create OpenAI chat handler with proper dependency injection."""
+
+    async def openai_chat_completions(
+        request: OpenAIChatRequest,
+        current_user: AuthenticatedUser = Depends(self.get_current_user),
+    ) -> StreamingResponse:
+        """OpenAI-compatible chat completions endpoint."""
+        return await self.ollama_proxy.openai_chat_completions(request, current_user)
+
+    return openai_chat_completions

@@ -1,8 +1,8 @@
 """Cloud API response models."""
 
+from datetime import datetime
 from enum import Enum
 from typing import List, Optional
-from datetime import datetime
 
 from pydantic import BaseModel, Field
 
@@ -47,7 +47,12 @@ class WorkspaceActionHistory(BaseModel):
     reason: str
     time_created: datetime
     time_updated: datetime
-    issuer_display_name: str
+    issuer_display_name: Optional[str] = Field(default=None)  # Allow None values
+
+    class Config:
+        """Pydantic configuration."""
+
+        extra = "allow"  # Allow extra fields from API response
 
 
 class Workspace(BaseModel):
@@ -62,6 +67,11 @@ class Workspace(BaseModel):
     allowed_actions: List[WorkspaceAction]
     resource_meta: ResourceMeta
     workspace_actions: List[WorkspaceActionHistory] = Field(default_factory=list)
+
+    class Config:
+        """Pydantic configuration."""
+
+        extra = "allow"  # Allow extra fields from API response
 
     @property
     def ip_address(self) -> str:
@@ -87,6 +97,11 @@ class WorkspaceListResponse(BaseModel):
     previous: Optional[str]
     results: List[Workspace]
 
+    class Config:
+        """Pydantic configuration."""
+
+        extra = "allow"  # Allow extra fields from API response
+
 
 class ActionResponse(BaseModel):
     """Response model for workspace actions - returns the updated workspace object."""
@@ -101,9 +116,10 @@ class ActionResponse(BaseModel):
     resource_meta: ResourceMeta
     workspace_actions: List[WorkspaceActionHistory] = Field(default_factory=list)
 
-    # Allow extra fields from the full workspace response
     class Config:
-        extra = "allow"
+        """Pydantic configuration."""
+
+        extra = "allow"  # Allow extra fields from API response
 
     @property
     def ip_address(self) -> str:
