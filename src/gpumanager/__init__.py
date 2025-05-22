@@ -1,2 +1,1 @@
-def main() -> None:
-    print("Hello from gpumanager!")
+from gpumanager.main import main

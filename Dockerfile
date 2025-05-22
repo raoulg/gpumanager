@@ -22,4 +22,4 @@ HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
     CMD python -c "import httpx; httpx.get('http://localhost:8000/health')"
 
 # Run the application
-CMD ["uv", "run", "src/gpumanager/main.py"]
+CMD ["uv", "run", "gpumanager"]
