@@ -1,8 +1,9 @@
 """GPU state management enums and models."""
 
+from datetime import datetime, timedelta
 from enum import Enum
-from datetime import datetime
 from typing import Optional
+
 from pydantic import BaseModel, Field
 
 
@@ -125,7 +126,7 @@ class GPUInfo(BaseModel):
         self, user_id: str, duration_minutes: int, model_name: Optional[str] = None
     ) -> None:
         """Set a reservation for this GPU."""
-        expires_at = datetime.now().replace(microsecond=0) + datetime.timedelta(
+        expires_at = datetime.now().replace(microsecond=0) + timedelta(
             minutes=duration_minutes
         )
 
