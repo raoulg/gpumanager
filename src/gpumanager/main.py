@@ -10,6 +10,7 @@ from gpumanager.config.loader import ConfigLoader
 from gpumanager.cloud.api import CloudAPI
 from gpumanager.api.handlers import RequestHandler
 from gpumanager.auth.manager import APIKeyManager
+from gpumanager.gpu.manager import GPUManager
 
 
 def setup_logging():
@@ -35,6 +36,8 @@ def setup_logging():
 
 def create_app_sync():
     """Synchronous app factory for uvicorn."""
+    from contextlib import asynccontextmanager
+
     # Setup logging
     setup_logging()
 
@@ -53,8 +56,25 @@ def create_app_sync():
         # Initialize API key manager
         api_key_manager = APIKeyManager(config.paths.api_keys_file)
 
-        # Create request handler
-        request_handler = RequestHandler(cloud_api, api_key_manager)
+        # Initialize GPU manager (without async initialization for now)
+        gpu_manager = GPUManager(cloud_api, config.timing)
+
+        @asynccontextmanager
+        async def lifespan(app):
+            # Startup
+            logger.info("Starting GPU manager initialization...")
+            await gpu_manager.initialize()
+            logger.success("GPU manager initialized successfully")
+            yield
+            # Shutdown
+            logger.info("Shutting down GPU manager...")
+            await gpu_manager.shutdown()
+            logger.success("GPU manager shutdown complete")
+
+        # Create request handler with lifespan
+        request_handler = RequestHandler(
+            cloud_api, api_key_manager, gpu_manager, lifespan
+        )
 
         logger.success("Application initialized successfully")
         return request_handler.app
