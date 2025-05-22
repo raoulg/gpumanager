@@ -1,0 +1,9 @@
+{
+  "api_keys": {
+    "api-key-here": {
+      "name": "Test User",
+      "email": "test@example.com",
+      "created": "2025-05-22"
+    }
+  }
+}
