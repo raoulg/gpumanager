@@ -1,9 +1,20 @@
 {
   "api_keys": {
-    "api-key-here": {
-      "name": "Test User",
-      "email": "test@example.com",
-      "created": "2025-05-22"
+    "sk-example123456789abcdef": {
+      "name": "Alice Smith",
+      "email": "alice@example.com",
+      "created": "2025-05-22",
+      "requests_today": 3,
+      "total_requests": 3,
+      "last_request": "2025-05-22 15:31:31.567455"
+    },
+    "sk-demo987654321fedcba": {
+      "name": "Bob Johnson",
+      "email": "bob@example.com",
+      "created": "2025-05-22",
+      "requests_today": 5,
+      "total_requests": 127,
+      "last_request": "2025-05-22 10:30:00"
     }
   }
 }
