@@ -9,6 +9,7 @@ from loguru import logger
 from gpumanager.config.loader import ConfigLoader
 from gpumanager.cloud.api import CloudAPI
 from gpumanager.api.handlers import RequestHandler
+from gpumanager.auth.manager import APIKeyManager
 
 
 def setup_logging():
@@ -46,11 +47,14 @@ def create_app_sync():
             f"Configuration loaded for {len(config.timing.__dict__)} timing settings"
         )
 
-        # Initialize cloud API (but don't test connection yet)
+        # Initialize cloud API
         cloud_api = CloudAPI(config.cloud_api)
 
+        # Initialize API key manager
+        api_key_manager = APIKeyManager(config.paths.api_keys_file)
+
         # Create request handler
-        request_handler = RequestHandler(cloud_api)
+        request_handler = RequestHandler(cloud_api, api_key_manager)
 
         logger.success("Application initialized successfully")
         return request_handler.app

@@ -1,13 +1,18 @@
 """FastAPI request handlers."""
 
 from typing import Dict, Any, Optional
-from fastapi import FastAPI, HTTPException, status, Path
+from fastapi import FastAPI, HTTPException, status, Path, Depends
 from pydantic import BaseModel
 
 from loguru import logger
 
 from gpumanager.cloud.api import CloudAPI, CloudAPIError
 from gpumanager.cloud.models import WorkspaceStatus
+from gpumanager.auth.manager import APIKeyManager
+from gpumanager.api.middleware import (
+    create_auth_dependency,
+    create_optional_auth_dependency,
+)
 
 
 class HealthResponse(BaseModel):
@@ -38,12 +43,18 @@ class ActionResponse(BaseModel):
 class RequestHandler:
     """FastAPI request handlers."""
 
-    def __init__(self, cloud_api: CloudAPI):
+    def __init__(self, cloud_api: CloudAPI, api_key_manager: APIKeyManager):
         """Initialize request handler."""
         self.cloud_api = cloud_api
+        self.api_key_manager = api_key_manager
+
+        # Create auth dependencies
+        self.get_current_user = create_auth_dependency(api_key_manager)
+        self.get_optional_user = create_optional_auth_dependency(api_key_manager)
+
         self.app = self._create_app()
 
-        logger.info("Initialized RequestHandler with dynamic GPU management")
+        logger.info("Initialized RequestHandler with authentication")
 
     def _create_app(self) -> FastAPI:
         """Create FastAPI application."""
@@ -53,14 +64,28 @@ class RequestHandler:
             version="0.1.0",
         )
 
-        # Register routes
+        # Register routes with authentication
         app.get("/health", response_model=HealthResponse)(self.health_check)
-        app.get("/gpu/discover")(self.discover_gpus)
-        app.get("/gpu/{gpu_id}/status", response_model=GPUStatusResponse)(
-            self.get_gpu_status
+
+        # Protected routes (require authentication)
+        app.get("/gpu/discover", dependencies=[Depends(self.get_current_user)])(
+            self.discover_gpus
         )
-        app.post("/gpu/{gpu_id}/resume", response_model=ActionResponse)(self.resume_gpu)
-        app.post("/gpu/{gpu_id}/pause", response_model=ActionResponse)(self.pause_gpu)
+        app.get(
+            "/gpu/{gpu_id}/status",
+            response_model=GPUStatusResponse,
+            dependencies=[Depends(self.get_current_user)],
+        )(self.get_gpu_status)
+        app.post(
+            "/gpu/{gpu_id}/resume",
+            response_model=ActionResponse,
+            dependencies=[Depends(self.get_current_user)],
+        )(self.resume_gpu)
+        app.post(
+            "/gpu/{gpu_id}/pause",
+            response_model=ActionResponse,
+            dependencies=[Depends(self.get_current_user)],
+        )(self.pause_gpu)
 
         return app
 
