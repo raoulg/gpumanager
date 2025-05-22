@@ -1,0 +1,16 @@
+[server]
+host = "0.0.0.0"
+port = 8000
+
+[cloud_api]
+base_url = "https://gw.live.surfresearchcloud.nl/v1"
+machine_name_filter = "GroulsR"
+
+[timing]
+reservation_minutes = 10
+fallback_reservation_minutes = 3
+startup_timeout_seconds = 120
+ollama_readiness_wait_seconds = 10
+
+[paths]
+api_keys_file = "api_keys.json"
