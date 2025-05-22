@@ -88,6 +88,11 @@ cp config.toml.example config.toml
 cp .env.example .env
 cp api_keys.json.example api_keys.json
 ```
+create api keys with
+
+```bash
+openssl rand -hex 32
+```
 
 ### 2. Configure Environment
 
