@@ -1,6 +1,6 @@
 """Configuration models using Pydantic."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from pathlib import Path
 from typing import Optional
 
@@ -56,8 +56,4 @@ class AppConfig(BaseModel):
     timing: TimingConfig = Field(default_factory=TimingConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
 
-    class Config:
-        """Pydantic configuration."""
-
-        extra = "forbid"  # Don't allow extra fields
-        validate_assignment = True  # Validate on assignment
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)

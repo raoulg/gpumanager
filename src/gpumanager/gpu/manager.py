@@ -81,7 +81,7 @@ class GPUManager:
             f"Selecting GPU for user {request.user_id}, model {request.model_name}"
         )
 
-        # 1. Check for GPU with model already loaded
+        # 1. Check for GPU with model already loaded AND available slots
         gpu_with_model = self._find_gpu_with_model(request.model_name)
         if gpu_with_model and gpu_with_model.is_available():
             logger.debug(f"Found GPU with model loaded: {gpu_with_model.gpu_id}")
@@ -93,7 +93,7 @@ class GPUManager:
                 message=f"GPU ready with {request.model_name} loaded",
             )
 
-        # 2. Check for available idle GPU
+        # 2. Check for available idle GPU (no model loaded)
         idle_gpu = self._find_available_gpu()
         if idle_gpu:
             logger.debug(f"Found available GPU: {idle_gpu.gpu_id}")
@@ -129,10 +129,17 @@ class GPUManager:
 
     def _find_gpu_with_model(self, model_name: str) -> Optional[GPUInfo]:
         """Find a GPU that already has the model loaded."""
+        # Sort by active requests (least busy first)
+        candidates = []
         for gpu in self.gpus.values():
             if gpu.has_model_loaded(model_name) and gpu.is_available():
-                return gpu
-        return None
+                candidates.append(gpu)
+        
+        if not candidates:
+            return None
+            
+        # Return the one with fewest active requests
+        return sorted(candidates, key=lambda g: g.active_requests)[0]
 
     def _find_available_gpu(self) -> Optional[GPUInfo]:
         """Find an available GPU (idle and no reservation)."""
@@ -195,6 +202,12 @@ class GPUManager:
             return False
 
         gpu = self.gpus[gpu_id]
+        
+        # Don't pause if there are active requests
+        if gpu.active_requests > 0:
+            logger.warning(f"GPU {gpu_id} has active requests, cannot pause")
+            return False
+
         if gpu.status not in [GPUModelStatus.IDLE, GPUModelStatus.MODEL_READY]:
             logger.warning(
                 f"GPU {gpu_id} cannot be paused, current status: {gpu.status}"

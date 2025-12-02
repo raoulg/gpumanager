@@ -84,34 +84,78 @@ def create_app_sync():
         raise
 
 
-def main():
-    """Main entry point."""
+def generate_key(name: str, email: str):
+    """Generate a new API key."""
+    import secrets
+    from gpumanager.config.loader import ConfigLoader
+    from gpumanager.auth.manager import APIKeyManager
+
     try:
-        # Create logs directory
-        Path("logs").mkdir(exist_ok=True)
-
-        # Setup logging first
-        setup_logging()
-
-        # Load config synchronously for server settings
         config = ConfigLoader.load_config()
-
-        logger.info(f"Starting server on {config.server.host}:{config.server.port}")
-
-        # Run with uvicorn, passing the factory function
-        uvicorn.run(
-            "gpumanager.main:create_app_sync",
-            host=config.server.host,
-            port=config.server.port,
-            reload=False,  # Set to True for development
-            log_level="info",
-            factory=True,
-        )
-
+        api_key_manager = APIKeyManager(config.paths.api_keys_file)
+        
+        # Generate secure key
+        api_key = f"sk-{secrets.token_urlsafe(32)}"
+        
+        if api_key_manager.add_user(api_key, name, email):
+            print(f"\nAPI Key generated successfully for {name} ({email}):")
+            print(f"\n{api_key}\n")
+            print("Keep this key safe! It has been saved to api_keys.json")
+        else:
+            print("Failed to add user (key might already exist, try again)")
+            sys.exit(1)
+            
     except Exception as e:
-        logger.error(f"Failed to start application: {e}")
+        logger.error(f"Failed to generate key: {e}")
         sys.exit(1)
 
+def main():
+    """Main entry point."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="LLM GPU Controller")
+    subparsers = parser.add_subparsers(dest="command", help="Command to run")
+    
+    # Server command
+    server_parser = subparsers.add_parser("server", help="Run the GPU manager server")
+    
+    # Generate key command
+    key_parser = subparsers.add_parser("generate-key", help="Generate a new API key")
+    key_parser.add_argument("--name", required=True, help="User name")
+    key_parser.add_argument("--email", required=True, help="User email")
+    
+    args = parser.parse_args()
+    
+    # Default to server if no command provided
+    if not args.command or args.command == "server":
+        try:
+            # Create logs directory
+            Path("logs").mkdir(exist_ok=True)
+
+            # Setup logging first
+            setup_logging()
+
+            # Load config synchronously for server settings
+            config = ConfigLoader.load_config()
+
+            logger.info(f"Starting server on {config.server.host}:{config.server.port}")
+
+            # Run with uvicorn, passing the factory function
+            uvicorn.run(
+                "gpumanager.main:create_app_sync",
+                host=config.server.host,
+                port=config.server.port,
+                reload=False,  # Set to True for development
+                log_level="info",
+                factory=True,
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to start application: {e}")
+            sys.exit(1)
+            
+    elif args.command == "generate-key":
+        generate_key(args.name, args.email)
 
 if __name__ == "__main__":
     main()

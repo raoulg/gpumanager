@@ -1,7 +1,7 @@
 """Ollama API request/response models."""
 
 from typing import Dict, List, Optional, Any, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 class OllamaGenerateRequest(BaseModel):
@@ -110,8 +110,7 @@ class ModelOptions(BaseModel):
     )
     tfs_z: Optional[float] = Field(default=None, description="TFS Z parameter")
 
-    class Config:
-        extra = "allow"  # Allow additional options
+    model_config = ConfigDict(extra="allow")  # Allow additional options
 
 
 class OllamaErrorResponse(BaseModel):

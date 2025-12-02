@@ -345,14 +345,31 @@ class RequestHandler:
         """Pass-through proxy for any Ollama API endpoint."""
         try:
             # Get any available GPU
-            available_gpu = None
-            for gpu in self.gpu_manager.gpus.values():
-                if gpu.status.value in ["idle", "model_ready"]:
-                    available_gpu = gpu
-                    break
-
-            if not available_gpu:
+            # We use select_gpu with a dummy model request to find an available GPU
+            # This ensures we respect slot limits
+            from gpumanager.gpu.models import GPUSelectionRequest
+            
+            # Use a dummy user ID for passthrough requests if not authenticated
+            # Ideally this endpoint should be authenticated too, but for now we'll use a placeholder
+            user_id = "passthrough_user"
+            
+            selection_request = GPUSelectionRequest(
+                user_id=user_id, 
+                model_name="unknown", # We don't know the model here easily without parsing body
+                context_length=None
+            )
+            
+            # 1. Select GPU
+            gpu_result = await self.gpu_manager.select_gpu(selection_request)
+            
+            if not gpu_result.gpu_info:
                 raise HTTPException(status_code=503, detail="No GPUs available")
+                
+            gpu = gpu_result.gpu_info
+            
+            # 2. Reserve GPU (to claim a slot)
+            if not await self.gpu_manager.reserve_gpu(gpu.gpu_id, user_id):
+                 raise HTTPException(status_code=503, detail="Failed to reserve GPU slot")
 
             # Get request body if present
             body = None
@@ -362,18 +379,25 @@ class RequestHandler:
                 except:
                     pass
 
-            # Proxy the request
-            import httpx
-
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.request(
-                    method=request.method,
-                    url=f"http://{available_gpu.ip_address}:11434/api/{path}",
-                    json=body,
-                    headers={"Content-Type": "application/json"} if body else None,
-                )
-
-                return JSONResponse(response.json() if response.content else {})
+            # 3. Mark as busy
+            gpu.start_request(user_id)
+            
+            try:
+                # Proxy the request
+                import httpx
+    
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    response = await client.request(
+                        method=request.method,
+                        url=f"http://{gpu.ip_address}:11434/api/{path}",
+                        json=body,
+                        headers={"Content-Type": "application/json"} if body else None,
+                    )
+    
+                    return JSONResponse(response.json() if response.content else {})
+            finally:
+                # 4. Release slot
+                gpu.finish_request()
 
         except Exception as e:
             logger.error(f"Error in passthrough for /api/{path}: {e}")

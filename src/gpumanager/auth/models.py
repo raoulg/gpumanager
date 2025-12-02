@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from typing import Optional, Dict
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 class UserInfo(BaseModel):
@@ -17,10 +17,7 @@ class UserInfo(BaseModel):
         default=None, description="Timestamp of last request"
     )
 
-    class Config:
-        """Pydantic configuration."""
-
-        extra = "allow"  # Allow additional fields for future extensions
+    model_config = ConfigDict(extra="allow")  # Allow additional fields for future extensions
 
 
 class APIKeysFile(BaseModel):
@@ -30,10 +27,7 @@ class APIKeysFile(BaseModel):
         default_factory=dict, description="Mapping of API keys to user information"
     )
 
-    class Config:
-        """Pydantic configuration."""
-
-        extra = "forbid"  # Don't allow extra fields at root level
+    model_config = ConfigDict(extra="forbid")  # Don't allow extra fields at root level
 
 
 class AuthenticatedUser(BaseModel):

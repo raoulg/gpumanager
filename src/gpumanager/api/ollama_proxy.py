@@ -1,6 +1,7 @@
 """Ollama proxy for intelligent request routing."""
 
 from typing import Optional, Dict, Any
+import asyncio
 import httpx
 from fastapi import HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -152,41 +153,53 @@ class OllamaProxy:
         self, model_name: str, user_id: str, context_length: Optional[int] = None
     ) -> Any:
         """Select and prepare the best GPU for the request."""
-        selection_request = GPUSelectionRequest(
-            user_id=user_id, model_name=model_name, context_length=context_length
-        )
+        
+        # Retry loop for race conditions
+        max_retries = 3
+        for attempt in range(max_retries):
+            selection_request = GPUSelectionRequest(
+                user_id=user_id, model_name=model_name, context_length=context_length
+            )
 
-        gpu_result = await self.gpu_manager.select_gpu(selection_request)
+            gpu_result = await self.gpu_manager.select_gpu(selection_request)
 
-        if not gpu_result.gpu_info:
-            return gpu_result
+            if not gpu_result.gpu_info:
+                return gpu_result
 
-        gpu = gpu_result.gpu_info
+            gpu = gpu_result.gpu_info
 
-        # Start GPU if needed
-        if gpu_result.requires_gpu_startup:
-            logger.info(f"Starting GPU {gpu.gpu_id} for user {user_id}")
-            success = await self.gpu_manager.start_gpu(gpu.gpu_id)
-            if not success:
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="Failed to start GPU",
-                )
+            # Start GPU if needed
+            if gpu_result.requires_gpu_startup:
+                logger.info(f"Starting GPU {gpu.gpu_id} for user {user_id}")
+                success = await self.gpu_manager.start_gpu(gpu.gpu_id)
+                if not success:
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Failed to start GPU",
+                    )
 
-        # Reserve the GPU
-        await self.gpu_manager.reserve_gpu(gpu.gpu_id, user_id, model_name)
+            # Reserve the GPU (this might fail if someone else took the slot)
+            reservation_success = await self.gpu_manager.reserve_gpu(gpu.gpu_id, user_id, model_name)
+            
+            if reservation_success:
+                # Load model if needed
+                if gpu_result.requires_model_load:
+                    logger.info(f"Loading model {model_name} on GPU {gpu.gpu_id}")
+                    await self._ensure_model_loaded(gpu.ip_address, model_name, context_length)
 
-        # Load model if needed
-        if gpu_result.requires_model_load:
-            logger.info(f"Loading model {model_name} on GPU {gpu.gpu_id}")
-            await self._ensure_model_loaded(gpu.ip_address, model_name, context_length)
+                    # Update GPU state
+                    model_info = ModelInfo(name=model_name, context_length=context_length)
+                    gpu.update_model(model_info)
+                    gpu.update_status(GPUModelStatus.MODEL_READY)
 
-            # Update GPU state
-            model_info = ModelInfo(name=model_name, context_length=context_length)
-            gpu.update_model(model_info)
-            gpu.update_status(GPUModelStatus.MODEL_READY)
-
-        return gpu_result
+                return gpu_result
+            
+            # If reservation failed, retry
+            logger.warning(f"Reservation failed for GPU {gpu.gpu_id}, retrying selection (attempt {attempt+1}/{max_retries})")
+            await asyncio.sleep(0.5)  # Small backoff
+            
+        # If we get here, we failed to get a reservation after retries
+        return gpu_result  # Return the last result (which might be failure or success but reservation failed)
 
     async def _ensure_model_loaded(
         self, gpu_ip: str, model_name: str, context_length: Optional[int] = None

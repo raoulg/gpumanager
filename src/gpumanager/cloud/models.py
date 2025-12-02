@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import Enum
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 class WorkspaceStatus(str, Enum):
@@ -49,10 +49,7 @@ class WorkspaceActionHistory(BaseModel):
     time_updated: datetime
     issuer_display_name: Optional[str] = Field(default=None)  # Allow None values
 
-    class Config:
-        """Pydantic configuration."""
-
-        extra = "allow"  # Allow extra fields from API response
+    model_config = ConfigDict(extra="allow")  # Allow extra fields from API response
 
 
 class Workspace(BaseModel):
@@ -68,10 +65,7 @@ class Workspace(BaseModel):
     resource_meta: ResourceMeta
     workspace_actions: List[WorkspaceActionHistory] = Field(default_factory=list)
 
-    class Config:
-        """Pydantic configuration."""
-
-        extra = "allow"  # Allow extra fields from API response
+    model_config = ConfigDict(extra="allow")  # Allow extra fields from API response
 
     @property
     def ip_address(self) -> str:
@@ -97,10 +91,7 @@ class WorkspaceListResponse(BaseModel):
     previous: Optional[str]
     results: List[Workspace]
 
-    class Config:
-        """Pydantic configuration."""
-
-        extra = "allow"  # Allow extra fields from API response
+    model_config = ConfigDict(extra="allow")  # Allow extra fields from API response
 
 
 class ActionResponse(BaseModel):
@@ -116,10 +107,7 @@ class ActionResponse(BaseModel):
     resource_meta: ResourceMeta
     workspace_actions: List[WorkspaceActionHistory] = Field(default_factory=list)
 
-    class Config:
-        """Pydantic configuration."""
-
-        extra = "allow"  # Allow extra fields from API response
+    model_config = ConfigDict(extra="allow")  # Allow extra fields from API response
 
     @property
     def ip_address(self) -> str:

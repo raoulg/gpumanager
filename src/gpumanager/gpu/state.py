@@ -87,6 +87,10 @@ class GPUInfo(BaseModel):
     total_requests: int = Field(default=0, description="Total requests processed")
     requests_today: int = Field(default=0, description="Requests processed today")
 
+    # Slot management
+    max_slots: int = Field(default=1, description="Maximum concurrent requests")
+    active_requests: int = Field(default=0, description="Current active requests")
+
     def update_status(self, new_status: GPUModelStatus) -> None:
         """Update GPU status and timestamp."""
         if new_status != self.status:
@@ -107,6 +111,7 @@ class GPUInfo(BaseModel):
 
     def start_request(self, user_id: str) -> None:
         """Mark GPU as busy with a new request."""
+        self.active_requests += 1
         self.update_status(GPUModelStatus.BUSY)
         self.last_request = datetime.now()
         self.total_requests += 1
@@ -117,10 +122,13 @@ class GPUInfo(BaseModel):
 
     def finish_request(self) -> None:
         """Mark request as finished, return to ready state."""
-        if self.loaded_model:
-            self.update_status(GPUModelStatus.MODEL_READY)
-        else:
-            self.update_status(GPUModelStatus.IDLE)
+        self.active_requests = max(0, self.active_requests - 1)
+        
+        if self.active_requests == 0:
+            if self.loaded_model:
+                self.update_status(GPUModelStatus.MODEL_READY)
+            else:
+                self.update_status(GPUModelStatus.IDLE)
 
         self.clear_reservation()
 
@@ -146,11 +154,25 @@ class GPUInfo(BaseModel):
         if self.reservation and self.reservation.is_expired():
             self.clear_reservation()
 
-        # Available if ready and no reservation
-        return (
-            self.status in [GPUModelStatus.MODEL_READY, GPUModelStatus.IDLE]
-            and self.reservation is None
-        )
+        # Available if ready and has slots
+        # Note: We don't check reservation here because reservation is a soft lock
+        # that prevents OTHER users from taking the LAST slot.
+        # But for general availability, we just check slots.
+        # The manager will handle the reservation logic.
+        
+        # Basic availability check:
+        # 1. Status is OK (IDLE, MODEL_READY, or BUSY but with slots)
+        # 2. Has available slots
+        
+        is_status_ok = self.status in [
+            GPUModelStatus.MODEL_READY, 
+            GPUModelStatus.IDLE,
+            GPUModelStatus.BUSY
+        ]
+        
+        has_slots = self.active_requests < self.max_slots
+        
+        return is_status_ok and has_slots and self.reservation is None
 
     def is_idle_too_long(self, idle_timeout_minutes: int) -> bool:
         """Check if GPU has been idle too long and should be paused."""
@@ -171,5 +193,5 @@ class GPUInfo(BaseModel):
         return (
             self.loaded_model is not None
             and self.loaded_model.name == model_name
-            and self.status == GPUModelStatus.MODEL_READY
+            and self.status in [GPUModelStatus.MODEL_READY, GPUModelStatus.BUSY]
         )
