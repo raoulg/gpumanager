@@ -4,12 +4,49 @@ A FastAPI-based service for managing GPU workspaces on SURF Research Cloud, desi
 
 ## Features
 
-- **Dynamic GPU Discovery**: Automatically discover available GPU workspaces
-- **Cloud API Integration**: Full SURF Research Cloud API integration
-- **GPU Control**: Resume/pause GPU workspaces on demand
-- **Configuration Management**: TOML configuration with environment variable secrets
-- **Docker Support**: Containerized deployment ready
-- **Type Safety**: Full Pydantic models and type hints
+- **Intelligent GPU Routing**: Automatically selects the best GPU for each request based on model availability, load, and reservation status.
+- **Slot Management**: Supports multiple concurrent requests per GPU (configurable slots).
+- **Auto-Scaling**: Wakes up paused GPUs when needed and pauses them when idle.
+- **Ollama Integration**: Seamless proxy for Ollama API, handling model loading and context management.
+- **Docker Support**: Easy deployment of Ollama on GPU nodes using Docker Compose.
+
+## Setup
+
+### GPU Nodes
+
+1. Install Docker and, if necessary, NVIDIA Container Toolkit on your GPU machines.
+2. Copy `gpu-node/docker-compose.yml` and `gpu-node/entrypoint.sh` to your GPU machine.
+3. (Optional) Edit `docker-compose.yml` to change the `OLLAMA_MODELS` environment variable. You can list multiple models separated by commas (e.g., `llama3.1:8b,qwen2.5:7b`).
+4. Run `docker-compose up -d` to start Ollama with GPU support.
+
+### Manager Node
+
+1. Install dependencies:
+   ```bash
+   pip install -e .
+   ```
+2. Configure `config.toml` with your cloud API credentials.
+   > **Note**: You do NOT need to manually enter GPU IP addresses. The manager automatically discovers them from the cloud provider based on the `machine_name_filter` in your config.
+
+3. Generate an API key for yourself:
+   ```bash
+   gpumanager generate-key --name "Your Name" --email "your@email.com"
+   ```
+
+4. Run the manager:
+   ```bash
+   gpumanager server
+   # or simply
+   gpumanager
+   ```
+
+## Testing
+
+Run the test suite with pytest:
+
+```bash
+pytest
+```
 
 ## Project Structure
 
