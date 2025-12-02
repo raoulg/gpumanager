@@ -4,7 +4,7 @@ port = 8000
 
 [cloud_api]
 base_url = "https://gw.live.surfresearchcloud.nl/v1"
-machine_name_filter = "GroulsR"
+machine_name_filter = "LMSTUDIO"
 
 [timing]
 reservation_minutes = 10
