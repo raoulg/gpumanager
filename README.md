@@ -94,6 +94,27 @@ create api keys with
 openssl rand -hex 32
 ```
 
+### 1.1 set up a host
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull llama3.1:8b-instruct-q8_0
+sudo systemctl edit ollama.service
+```
+then, add
+```toml
+[Service]
+Environment="OLLAMA_HOST=0.0.0.0:11434"
+```
+
+save and exit. then
+
+```bash 
+sudo systemctl daemon-reload
+sudo systemctl restart ollama
+ss -tulnp | grep 11434
+```
+
+
 ### 2. Configure Environment
 
 **Edit `.env`** with your SURF Cloud API credentials:
