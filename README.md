@@ -14,16 +14,36 @@ A FastAPI-based service for managing GPU workspaces on SURF Research Cloud, desi
 
 ### GPU Nodes
 
-1. Install Docker and, if necessary, NVIDIA Container Toolkit on your GPU machines.
-2. Copy `gpu-node/docker-compose.yml` and `gpu-node/entrypoint.sh` to your GPU machine.
-3. (Optional) Edit `docker-compose.yml` to change the `OLLAMA_MODELS` environment variable. You can list multiple models separated by commas (e.g., `llama3.1:8b,qwen2.5:7b`).
-4. Run `docker-compose up -d` to start Ollama with GPU support.
+1. Install Docker and NVIDIA Container Toolkit:
+```bash
+curl -fsSL https://raw.githubusercontent.com/raoulg/mlflow-serversetup/refs/heads/main/install-docker.sh | sudo bash
+```
+
+2. Setup and run the GPU node:
+```bash
+curl -fsSL https://raw.githubusercontent.com/raoulg/gpumanager/refs/heads/main/gpu-node/setup.sh | bash
+```
+This will download the required files and start the service.
+
+**Optional**: To also setup a shared directory (`/srv/shared`) for collaboration:
+```bash
+curl -fsSL https://raw.githubusercontent.com/raoulg/gpumanager/refs/heads/main/gpu-node/setup.sh | bash -s -- --shared
+```
+
+3. (Optional) To change models, edit `docker-compose.yml` and restart:
+```bash
+nano docker-compose.yml
+docker compose up -d
+```
 
 ### Manager Node
-
-1. Install dependencies:
+0. install uv 
+  ```bash
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  ```
+1. Install dependencies with uv:
    ```bash
-   pip install -e .
+   uv sync
    ```
 2. Configure `config.toml` with your cloud API credentials.
    > **Note**: You do NOT need to manually enter GPU IP addresses. The manager automatically discovers them from the cloud provider based on the `machine_name_filter` in your config.
