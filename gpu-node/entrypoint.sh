@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Start Ollama in the background.
-/bin/ollama serve &
+ollama serve &
 pid=$!
 
 # Wait for Ollama to start.

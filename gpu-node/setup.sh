@@ -43,7 +43,7 @@ if [ "$SHARED_SETUP" = true ]; then
     sudo mkdir -p /srv/shared
     
     # Set permissions
-    sudo chgrp collaborators /srv/shared
+    sudo chown "$CURRENT_USER":collaborators /srv/shared
     sudo chmod g+rws,o-w /srv/shared
     
     # Add user to group
