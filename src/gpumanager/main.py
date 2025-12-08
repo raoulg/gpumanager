@@ -124,6 +124,18 @@ def main():
     key_parser.add_argument("--name", required=True, help="User name")
     key_parser.add_argument("--email", required=True, help="User email")
     
+    # Deploy command
+    deploy_parser = subparsers.add_parser("deploy", help="Deploy GPU nodes")
+    deploy_parser.add_argument("username", help="Username for remote setup")
+    deploy_parser.add_argument("--ips", help="Path to file containing IP addresses (disables discovery)")
+    
+    # Open Port Command
+    open_port_parser = subparsers.add_parser("open-port", help="Open a port in the cloud firewall")
+    group = open_port_parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--ip", help="IP address of the target machine")
+    group.add_argument("--name", help="Name of the target machine")
+    open_port_parser.add_argument("--port", type=int, default=8000, help="Port to open (default: 8000)")
+    
     args = parser.parse_args()
     
     # Default to server if no command provided
@@ -156,6 +168,71 @@ def main():
             
     elif args.command == "generate-key":
         generate_key(args.name, args.email)
+
+    elif args.command == "deploy":
+        import asyncio
+        from gpumanager.deployment import DeploymentManager
+        
+        setup_logging()
+        
+        cloud_api = None
+        # Always try to initialize Cloud API for smart features (auto-resume/reverse lookup)
+        try:
+            config = ConfigLoader.load_config()
+            cloud_api = CloudAPI(config.cloud_api)
+        except Exception as e:
+            if not args.ips:
+                 # If no manual IPs and API fails, we can't do anything
+                 logger.error(f"Failed to initialize cloud API for discovery: {e}")
+                 sys.exit(1)
+            else:
+                 # If manual IPs provided, we can fallback to dumb mode
+                 logger.warning(f"Cloud API not available ({e}). Smart features disabled.")
+        
+        manager = DeploymentManager(cloud_api)
+        try:
+            asyncio.run(manager.deploy_all(args.username, args.ips))
+        except Exception as e:
+            logger.error(f"Deployment failed: {e}")
+            sys.exit(1)
+
+    elif args.command == "open-port":
+        import asyncio
+        
+        async def run_open_port():
+            config = ConfigLoader.load_config()
+            # Clear filter to find ANY workspace (e.g. manager)
+            config.cloud_api.machine_name_filter = "" 
+            api = CloudAPI(config.cloud_api)
+            
+            target = None
+            if args.ip:
+                logger.info(f"Searching for workspace with IP {args.ip}...")
+                workspaces = await api.list_workspaces()
+                target = next((w for w in workspaces if w.resource_meta and w.resource_meta.ip == args.ip), None)
+            elif args.name:
+                logger.info(f"Searching for workspace with name {args.name}...")
+                workspaces = await api.list_workspaces() # Still list all to be safe? or use filter? list all is safer if filter logic is complex
+                target = next((w for w in workspaces if w.name == args.name), None)
+            
+            if not target:
+                logger.error("Target workspace not found.")
+                sys.exit(1)
+                
+            logger.info(f"Found workspace: {target.name} ({target.id})")
+            
+            rule = f"in tcp {args.port} {args.port} 0.0.0.0/0"
+            logger.info(f"Adding rule: {rule}")
+            
+            try:
+                await api.update_nsgs(target.id, [rule])
+                logger.success(f"Port {args.port} opened successfully on {target.name}")
+            except Exception as e:
+                logger.error(f"Failed to open port: {e}")
+                sys.exit(1)
+
+        setup_logging()
+        asyncio.run(run_open_port())
 
 if __name__ == "__main__":
     main()
