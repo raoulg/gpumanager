@@ -14,23 +14,22 @@ A FastAPI-based service for managing GPU workspaces on SURF Research Cloud, desi
 
 ### GPU Nodes
 
-1. Install Docker and NVIDIA Container Toolkit:
-```bash
-curl -fsSL https://raw.githubusercontent.com/raoulg/mlflow-serversetup/refs/heads/main/install-docker.sh | sudo bash
-```
+1. Deploy using the Manager:
+   Use the manager to automatically setup software on all GPU nodes.
+   ```bash
+   # Auto-discovery mode (finds all GPU VMs in your cloud project)
+   gpumanager deploy <your-username>
+   
+   # Or manual mode (provide a list of IPs)
+   gpumanager deploy <your-username> --ips ips.txt
+   ```
+   This will:
+   - Install Docker & NVIDIA Container Toolkit (using `gpu-node/install-docker.sh`)
+   - Create the `collaborators` group with your user
+   - Setup shared volumes
+   - Start the Ollama proxy service
 
-2. Setup and run the GPU node:
-```bash
-curl -fsSL https://raw.githubusercontent.com/raoulg/gpumanager/refs/heads/main/gpu-node/setup.sh | bash
-```
-This will download the required files and start the service.
-
-**Optional**: To also setup a shared directory (`/srv/shared`) for collaboration:
-```bash
-curl -fsSL https://raw.githubusercontent.com/raoulg/gpumanager/refs/heads/main/gpu-node/setup.sh | bash -s -- --shared
-```
-
-3. (Optional) To change models, edit `docker-compose.yml` and restart:
+2. (Optional) To change models, edit `docker-compose.yml` and restart:
 ```bash
 nano docker-compose.yml
 docker compose up -d
@@ -60,6 +59,14 @@ docker compose up -d
    gpumanager
    ```
 
+5. **Configure Firewall (Important)**:
+   Ensure port 8000 is open for the manager so you can access it:
+   ```bash
+   gpumanager open-port --name "LLM-manager" --port 8000
+   # or using IP
+   gpumanager open-port --ip <MANAGER_IP>
+   ```
+
 ## Testing
 
 Run the test suite with pytest:
@@ -67,6 +74,42 @@ Run the test suite with pytest:
 ```bash
 pytest
 ```
+
+## Testing Deployment
+
+To test the deployment script on a single machine before running it fleet-wide:
+
+1. Create a file `test_ip.txt` with the IP of your test VM.
+2. Run the deployment in manual mode:
+   ```bash
+   gpumanager deploy <your-username> --ips test_ip.txt
+   ```
+### 4. Running the deployment:
+   ```bash
+   gpumanager deploy <your-username> --ips test_ip.txt
+   ```
+
+   1.  Automatically configure the cloud firewall (NSG) to open port 11434.
+   2.  Install Docker and NVIDIA drivers if missing.
+   3.  Start the Ollama service.
+
+### Manual Verification
+After deployment, you can verify the node is working by running these commands (replace IP with your node's IP):
+
+1. **Check Models**:
+   ```bash
+   curl http://<IP>:11434/api/tags
+   ```
+
+2. **Test Query**:
+   ```bash
+   curl -X POST http://<IP>:11434/api/generate -d '{
+     "model": "llama3.1:latest",
+     "prompt": "Say hello!",
+     "stream": false
+   }'
+   ```
+   *(Note: You may need to pull a model first if the list is empty)*
 
 ## Project Structure
 
@@ -361,3 +404,6 @@ The application logs to both console and `logs/app.log` with detailed informatio
 2. Add tests for new functionality
 3. Update documentation for API changes
 4. Use proper logging with the `loguru` logger
+
+
+pytest tests/test_integration.py -v -s
