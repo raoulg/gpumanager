@@ -167,6 +167,44 @@ class CloudAPI:
         )
         return False
 
+    async def update_nsgs(self, workspace_id: str, custom_rules: List[str]) -> ActionResponse:
+        """Update Network Security Groups for a workspace.
+        
+        Note: SURF Research Cloud has mandatory immutable rules. This method handles
+        appending the 'immutable' suffix to mandatory rules and 'mutable' to custom rules.
+        """
+        endpoint = f"/workspace/workspaces/{workspace_id}/actions/update_nsgs/"
+        
+        # Mandatory rules provided by SURF documentation/support
+        mandatory_rules = [
+            "in tcp 443 443 0.0.0.0/0 immutable",
+            "in tcp 80 80 0.0.0.0/0 immutable",
+            "in tcp 1 65535 10.10.10.0/24 immutable",
+            "in tcp 3389 3389 0.0.0.0/0 immutable",
+            "out tcp 1 65535 10.10.10.0/24 immutable",
+            "out tcp 1 65535 0.0.0.0/0 immutable",
+            "in tcp 22 22 0.0.0.0/0 immutable",
+            "in udp 1 65535 10.10.10.0/24 immutable",
+            "out udp 1 65535 10.10.10.0/24 immutable",
+            "out udp 1 65535 0.0.0.0/0 immutable",
+        ]
+
+        # Format custom rules with 'mutable' suffix
+        formatted_custom_rules = [f"{rule} mutable" for rule in custom_rules]
+        
+        full_rules = mandatory_rules + formatted_custom_rules
+        
+        payload = {
+            "network_security_group_rules": full_rules
+        }
+
+        logger.info(f"Updating NSGs for workspace {workspace_id} with {len(formatted_custom_rules)} custom rules")
+        
+        response_data = await self._make_request("POST", endpoint, json_data=payload)
+        action_response = ActionResponse(**response_data)
+        
+        return action_response
+
     async def discover_gpu_workspaces(self) -> List[Workspace]:
         """Discover all GPU workspaces for management."""
         workspaces = await self.list_workspaces()
