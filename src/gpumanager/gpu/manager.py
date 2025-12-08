@@ -142,9 +142,10 @@ class GPUManager:
         return sorted(candidates, key=lambda g: g.active_requests)[0]
 
     def _find_available_gpu(self) -> Optional[GPUInfo]:
-        """Find an available GPU (idle and no reservation)."""
+        """Find an available GPU (idle or ready, and no reservation)."""
         for gpu in self.gpus.values():
-            if gpu.status == GPUModelStatus.IDLE and gpu.is_available():
+            # Allow reusing MODEL_READY GPUs for generic requests
+            if gpu.status in [GPUModelStatus.IDLE, GPUModelStatus.MODEL_READY] and gpu.is_available():
                 return gpu
         return None
 
@@ -237,12 +238,24 @@ class GPUManager:
         self, gpu_id: str, user_id: str, model_name: Optional[str] = None
     ) -> bool:
         """Reserve a GPU for a user."""
-        if gpu_id not in self.gpus:
-            return False
-
         gpu = self.gpus[gpu_id]
-        if not gpu.is_available():
-            return False
+        
+        # Check if safe to reserve
+        # We allow reserving if:
+        # 1. No existing reservation
+        # 2. Status is OK (Available OR Paused/Starting/Pausing)
+        # Note: We bypass strict is_available() because we want to allow reserving Paused GPUs to wake them up
+        if gpu.reservation is not None:
+             # Already reserved
+             return False
+             
+        # If it's active, check slots
+        if gpu.status in [GPUModelStatus.IDLE, GPUModelStatus.MODEL_READY, GPUModelStatus.BUSY]:
+            if not gpu.is_available(): # Checks slots + reservation
+                return False
+                
+        # If Paused/Starting, we can reserve (exclusive lock effectively due to reservation check above)
+        # Proceed to set reservation
 
         # Set reservation
         gpu.set_reservation(

@@ -371,6 +371,12 @@ class RequestHandler:
             if not await self.gpu_manager.reserve_gpu(gpu.gpu_id, user_id):
                  raise HTTPException(status_code=503, detail="Failed to reserve GPU slot")
 
+            # 2.1 Start GPU if needed
+            if gpu_result.requires_gpu_startup:
+                logger.info(f"Passthrough selected paused GPU, starting {gpu.gpu_id}...")
+                if not await self.gpu_manager.start_gpu(gpu.gpu_id):
+                    raise HTTPException(status_code=500, detail="Failed to start GPU")
+
             # Get request body if present
             body = None
             if request.method in ["POST", "PUT", "PATCH"]:
