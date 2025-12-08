@@ -142,11 +142,18 @@ class GPUManager:
         return sorted(candidates, key=lambda g: g.active_requests)[0]
 
     def _find_available_gpu(self) -> Optional[GPUInfo]:
-        """Find an available GPU (idle or ready, and no reservation)."""
+        """Find an available GPU (prioritizing idle ones)."""
+        # Pass 1: Check for IDLE GPUs (Preferred)
         for gpu in self.gpus.values():
-            # Allow reusing MODEL_READY GPUs for generic requests
-            if gpu.status in [GPUModelStatus.IDLE, GPUModelStatus.MODEL_READY] and gpu.is_available():
+            if gpu.status == GPUModelStatus.IDLE and gpu.is_available():
                 return gpu
+                
+        # Pass 2: Check for MODEL_READY GPUs (Fallback)
+        # We allow reusing these for generic requests to avoid waking up a paused GPU
+        for gpu in self.gpus.values():
+            if gpu.status == GPUModelStatus.MODEL_READY and gpu.is_available():
+                return gpu
+                
         return None
 
     def _find_paused_gpu(self) -> Optional[GPUInfo]:
