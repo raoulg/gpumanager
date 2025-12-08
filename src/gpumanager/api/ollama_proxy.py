@@ -185,12 +185,20 @@ class OllamaProxy:
                 # Load model if needed
                 if gpu_result.requires_model_load:
                     logger.info(f"Loading model {model_name} on GPU {gpu.gpu_id}")
-                    await self._ensure_model_loaded(gpu.ip_address, model_name, context_length)
+                    try:
+                        await self._ensure_model_loaded(gpu.ip_address, gpu.name, model_name, context_length)
 
-                    # Update GPU state
-                    model_info = ModelInfo(name=model_name, context_length=context_length)
-                    gpu.update_model(model_info)
-                    gpu.update_status(GPUModelStatus.MODEL_READY)
+                        # Update GPU state
+                        model_info = ModelInfo(name=model_name, context_length=context_length)
+                        gpu.update_model(model_info)
+                        gpu.update_status(GPUModelStatus.MODEL_READY)
+                    except Exception as e:
+                        logger.error(f"Failed to load model on {gpu.name} ({gpu.gpu_id}). Marking node as ERROR state.")
+                        gpu.update_status(GPUModelStatus.ERROR)
+                        # We should also clear the reservation so it doesn't expire naturally, 
+                        # but status=ERROR already prevents selection.
+                        # Re-raise to stop the request
+                        raise
 
                 return gpu_result
             
@@ -202,7 +210,7 @@ class OllamaProxy:
         return gpu_result  # Return the last result (which might be failure or success but reservation failed)
 
     async def _ensure_model_loaded(
-        self, gpu_ip: str, model_name: str, context_length: Optional[int] = None
+        self, gpu_ip: str, gpu_name: str, model_name: str, context_length: Optional[int] = None
     ) -> None:
         """Ensure model is loaded on the GPU."""
         # Make a simple generation request to trigger model loading
@@ -222,18 +230,25 @@ class OllamaProxy:
                     f"http://{gpu_ip}:11434/api/generate", json=load_request
                 )
                 if response.status_code != 200:
+                    error_text = response.text
                     logger.warning(
-                        f"Model loading returned status {response.status_code}"
+                        f"Model loading on {gpu_name} ({gpu_ip}) returned status {response.status_code}: {error_text}"
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail=f"Failed to load model on node {gpu_name} ({gpu_ip}): Status {response.status_code} - {error_text}",
                     )
                 else:
                     logger.success(
-                        f"Model {model_name} loaded successfully on {gpu_ip}"
+                        f"Model {model_name} loaded successfully on {gpu_name} ({gpu_ip})"
                     )
+            except HTTPException:
+                raise
             except Exception as e:
-                logger.error(f"Failed to load model {model_name} on {gpu_ip}: {e}")
+                logger.error(f"Failed to load model {model_name} on {gpu_name} ({gpu_ip}): {e}")
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail=f"Failed to load model: {e}",
+                    detail=f"Failed to load model on {gpu_name}: {e}",
                 )
 
     async def _proxy_generate_request(
