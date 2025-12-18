@@ -133,9 +133,8 @@ class RequestHandler:
         # Passthrough for all other Ollama endpoints (also requires authentication)
         app.api_route(
             "/api/{path:path}",
-            methods=["GET", "POST", "PUT", "DELETE"],
-            dependencies=[Depends(self.get_current_user)]
-        )(self.ollama_passthrough)
+            methods=["GET", "POST", "PUT", "DELETE"]
+        )(self._create_passthrough_handler())
 
         return app
 
@@ -344,15 +343,27 @@ class RequestHandler:
 
         return openai_chat_completions
 
-    async def ollama_passthrough(
+    def _create_passthrough_handler(self):
+        """Create passthrough handler with proper dependency injection."""
+
+        async def ollama_passthrough(
+            request: Request,
+            path: str = Path(...),
+            current_user: AuthenticatedUser = Depends(self.get_current_user),
+        ):
+            """Pass-through proxy for any Ollama API endpoint (authenticated)."""
+            return await self._ollama_passthrough_impl(request, path, current_user)
+
+        return ollama_passthrough
+
+    async def _ollama_passthrough_impl(
         self,
         request: Request,
-        path: str = Path(...)
+        path: str,
+        current_user: AuthenticatedUser
     ):
-        """Pass-through proxy for any Ollama API endpoint (authenticated)."""
+        """Implementation of passthrough proxy."""
         try:
-            # Get authenticated user from request state (set by auth dependency)
-            current_user = await self.get_current_user(request)
 
             # Parse request body first to extract model name if present
             body = None
