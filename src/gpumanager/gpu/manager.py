@@ -1,6 +1,7 @@
 """GPU Manager for intelligent GPU and model management."""
 
 import asyncio
+from datetime import datetime
 from typing import Dict, Optional, Set
 from collections import defaultdict
 
@@ -169,50 +170,39 @@ class GPUManager:
         """Find a GPU that already has the model loaded."""
         # Sort by active requests (least busy first)
         candidates = []
+        logger.debug(f"Searching for GPUs with model {model_name} loaded...")
+
         for gpu in self.gpus.values():
-            if gpu.has_model_loaded(model_name) and gpu.is_available():
-                candidates.append(gpu)
-            elif gpu.has_model_loaded(model_name):
+            if gpu.has_model_loaded(model_name):
                 logger.debug(
-                    f"GPU {gpu.name} ({gpu.gpu_id}) has model {model_name} but is not available. "
-                    f"Status: {gpu.status}, Active: {gpu.active_requests}/{gpu.max_slots}, "
-                    f"Reserved: {gpu.reservation is not None}"
+                    f"  {gpu.name}: has model {model_name}, "
+                    f"status={gpu.status}, active={gpu.active_requests}/{gpu.max_slots}, "
+                    f"reserved={gpu.reservation is not None}, available={gpu.is_available()}"
                 )
-        
+                if gpu.is_available():
+                    candidates.append(gpu)
+                else:
+                    logger.info(
+                        f"  {gpu.name} has model {model_name} but is NOT available: "
+                        f"status={gpu.status}, active={gpu.active_requests}/{gpu.max_slots}, "
+                        f"reserved={gpu.reservation is not None}"
+                    )
+
         if not candidates:
-            logger.debug(f"No GPUs found with model {model_name} loaded")
+            logger.info(f"No available GPUs found with model {model_name} loaded")
             return None
 
         # Return the one with fewest active requests
         # Log all candidates
-        logger.debug(f"Found {len(candidates)} GPUs with model {model_name}: {[g.name for g in candidates]}")
+        logger.info(f"Found {len(candidates)} available GPUs with model {model_name}: {[g.name for g in candidates]}")
         selected = sorted(candidates, key=lambda g: g.active_requests)[0]
-        logger.debug(f"Selected GPU with model: {selected.name}")
+        logger.info(f"Selected GPU with model: {selected.name}")
         return selected
 
     def _find_available_gpu(self) -> Optional[GPUInfo]:
-        """Find an available GPU (prioritizing idle ones)."""
-        # Pass 1: Check for IDLE GPUs (Preferred)
-        idle_candidates = []
-        for gpu in self.gpus.values():
-            if gpu.status == GPUModelStatus.IDLE:
-                if gpu.is_available():
-                    idle_candidates.append(gpu)
-                else:
-                    logger.debug(
-                        f"Skipping IDLE GPU {gpu.name} ({gpu.gpu_id}): "
-                        f"Active: {gpu.active_requests}/{gpu.max_slots}, "
-                        f"Reserved: {gpu.reservation if gpu.reservation else 'No'}"
-                    )
-        
-        if idle_candidates:
-            logger.debug(f"Found {len(idle_candidates)} IDLE and available GPUs: {[g.name for g in idle_candidates]}")
-            selected = idle_candidates[0]
-            logger.debug(f"Selected IDLE GPU: {selected.name}")
-            return selected
-                
-        # Pass 2: Check for MODEL_READY GPUs (Fallback)
-        # We allow reusing these for generic requests to avoid waking up a paused GPU
+        """Find an available GPU (prioritizing GPUs with models loaded to consolidate usage)."""
+        # Pass 1: Check for MODEL_READY GPUs (Preferred - consolidate onto GPUs with models)
+        # This prevents spinning up multiple GPUs when one with a model can handle generic requests
         ready_candidates = []
         for gpu in self.gpus.values():
             if gpu.status == GPUModelStatus.MODEL_READY:
@@ -220,16 +210,36 @@ class GPUManager:
                     ready_candidates.append(gpu)
                 else:
                     logger.debug(
-                        f"Skipping MODEL_READY GPU {gpu.name} ({gpu.gpu_id}): consumed by {gpu.loaded_model.name if gpu.loaded_model else 'Unknown'}. "
+                        f"Skipping MODEL_READY GPU {gpu.name}: has {gpu.loaded_model.name if gpu.loaded_model else 'Unknown'}. "
                         f"Active: {gpu.active_requests}/{gpu.max_slots}, "
                         f"Reserved: {gpu.reservation if gpu.reservation else 'No'}"
                     )
-        
+
         if ready_candidates:
-             logger.debug(f"Found {len(ready_candidates)} MODEL_READY and available GPUs (for reuse): {[g.name for g in ready_candidates]}")
-             selected = ready_candidates[0]
+             logger.debug(f"Found {len(ready_candidates)} MODEL_READY and available GPUs: {[g.name for g in ready_candidates]}")
+             # Sort by most recent activity to use the "hottest" GPU
+             selected = sorted(ready_candidates, key=lambda g: g.last_request or datetime.min, reverse=True)[0]
              logger.debug(f"Selected MODEL_READY GPU: {selected.name}")
              return selected
+
+        # Pass 2: Check for IDLE GPUs (Fallback - only if no MODEL_READY GPUs available)
+        idle_candidates = []
+        for gpu in self.gpus.values():
+            if gpu.status == GPUModelStatus.IDLE:
+                if gpu.is_available():
+                    idle_candidates.append(gpu)
+                else:
+                    logger.debug(
+                        f"Skipping IDLE GPU {gpu.name}: "
+                        f"Active: {gpu.active_requests}/{gpu.max_slots}, "
+                        f"Reserved: {gpu.reservation if gpu.reservation else 'No'}"
+                    )
+
+        if idle_candidates:
+            logger.debug(f"Found {len(idle_candidates)} IDLE and available GPUs: {[g.name for g in idle_candidates]}")
+            selected = idle_candidates[0]
+            logger.debug(f"Selected IDLE GPU: {selected.name}")
+            return selected
              
         logger.debug("No available IDLE or MODEL_READY GPUs found in _find_available_gpu")
         return None
