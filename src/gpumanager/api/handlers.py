@@ -398,19 +398,18 @@ class RequestHandler:
             # They just proxy through and wait if the GPU is busy
             logger.debug(f"Proxying passthrough request to GPU {gpu.name} (no reservation)")
 
-            try:
-                # Proxy the request directly without reserving
-                import httpx
+            # Proxy the request directly without reserving
+            import httpx
 
-                async with httpx.AsyncClient(timeout=60.0) as client:
-                    response = await client.request(
-                        method=request.method,
-                        url=f"http://{gpu.ip_address}:11434/api/{path}",
-                        json=body,
-                        headers={"Content-Type": "application/json"} if body else None,
-                    )
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.request(
+                    method=request.method,
+                    url=f"http://{gpu.ip_address}:11434/api/{path}",
+                    json=body,
+                    headers={"Content-Type": "application/json"} if body else None,
+                )
 
-                    return JSONResponse(response.json() if response.content else {})
+                return JSONResponse(response.json() if response.content else {})
 
         except Exception as e:
             logger.error(f"Error in passthrough for /api/{path}: {e}")
