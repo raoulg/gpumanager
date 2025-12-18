@@ -184,7 +184,7 @@ class OllamaProxy:
             if reservation_success:
                 # Load model if needed
                 if gpu_result.requires_model_load:
-                    logger.info(f"Loading model {model_name} on GPU {gpu.gpu_id}")
+                    logger.info(f"Loading model {model_name} on GPU {gpu.name} ({gpu.gpu_id})")
                     try:
                         await self._ensure_model_loaded(gpu.ip_address, gpu.name, model_name, context_length)
 
@@ -223,6 +223,8 @@ class OllamaProxy:
 
         if context_length:
             load_request["options"]["num_ctx"] = context_length
+
+        logger.info(f"Sending model load request to {gpu_name} ({gpu_ip}): {load_request}")
 
         async with httpx.AsyncClient(timeout=120.0) as client:
             try:
