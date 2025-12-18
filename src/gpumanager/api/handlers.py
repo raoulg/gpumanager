@@ -367,22 +367,20 @@ class RequestHandler:
                 
             gpu = gpu_result.gpu_info
             
-            # 2. Reserve GPU (to claim a slot)
-            if not await self.gpu_manager.reserve_gpu(gpu.gpu_id, user_id):
-                 raise HTTPException(status_code=503, detail="Failed to reserve GPU slot")
-
-            # 2.1 Start GPU if needed
+            # 2. Start GPU if needed (BEFORE reserving)
             if gpu_result.requires_gpu_startup:
-                logger.info(f"Passthrough selected paused GPU, starting {gpu.gpu_id}...")
+                logger.info(f"Passthrough selected paused GPU, starting {gpu.name}...")
                 try:
                     if not await self.gpu_manager.start_gpu(gpu.gpu_id):
                         # Use 500 explicitly
                         raise HTTPException(status_code=500, detail="Failed to start GPU")
                 except Exception:
-                    # Clear reservation if startup fails
-                    logger.warning(f"Startup failed for {gpu.gpu_id}, clearing reservation")
-                    gpu.clear_reservation()
+                    logger.warning(f"Startup failed for {gpu.name}")
                     raise
+
+            # 2.1 Reserve GPU (to claim a slot)
+            if not await self.gpu_manager.reserve_gpu(gpu.gpu_id, user_id):
+                 raise HTTPException(status_code=503, detail="Failed to reserve GPU slot")
 
             # Get request body if present
             body = None
@@ -393,13 +391,13 @@ class RequestHandler:
                     pass
 
             # 3. Mark as busy
-            logger.debug(f"Starting passthrough request on GPU {gpu.gpu_id}")
+            logger.debug(f"Starting passthrough request on GPU {gpu.name}")
             gpu.start_request(user_id)
-            
+
             try:
                 # Proxy the request
                 import httpx
-    
+
                 async with httpx.AsyncClient(timeout=60.0) as client:
                     response = await client.request(
                         method=request.method,
@@ -407,11 +405,11 @@ class RequestHandler:
                         json=body,
                         headers={"Content-Type": "application/json"} if body else None,
                     )
-    
+
                     return JSONResponse(response.json() if response.content else {})
             finally:
                 # 4. Release slot
-                logger.debug(f"Finishing passthrough request on GPU {gpu.gpu_id}")
+                logger.debug(f"Finishing passthrough request on GPU {gpu.name}")
                 gpu.finish_request()
 
         except Exception as e:

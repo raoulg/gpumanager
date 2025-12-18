@@ -98,7 +98,7 @@ class CloudAPI:
         """Get specific workspace details."""
         endpoint = f"/workspace/workspaces/{workspace_id}/"
 
-        log_name = f"{name} ({workspace_id})" if name else workspace_id
+        log_name = name if name else workspace_id
         logger.info(f"Getting workspace details: {log_name}")
 
         response_data = await self._make_request("GET", endpoint)
@@ -111,26 +111,26 @@ class CloudAPI:
         """Resume a paused workspace."""
         endpoint = f"/workspace/workspaces/{workspace_id}/actions/resume/"
 
-        log_name = f"{name} ({workspace_id})" if name else workspace_id
+        log_name = name if name else workspace_id
         logger.info(f"Resuming workspace: {log_name}")
 
         response_data = await self._make_request("POST", endpoint, json_data={})
         action_response = ActionResponse(**response_data)
 
-        logger.info(f"Resume action initiated for {log_name}: {action_response.id}")
+        logger.info(f"Resume action initiated for {log_name}")
         return action_response
 
     async def pause_workspace(self, workspace_id: str, name: Optional[str] = None) -> ActionResponse:
         """Pause an active workspace."""
         endpoint = f"/workspace/workspaces/{workspace_id}/actions/pause/"
 
-        log_name = f"{name} ({workspace_id})" if name else workspace_id
+        log_name = name if name else workspace_id
         logger.info(f"Pausing workspace: {log_name}")
 
         response_data = await self._make_request("POST", endpoint, json_data={})
         action_response = ActionResponse(**response_data)
 
-        logger.info(f"Pause action initiated for {log_name}: {action_response.id}")
+        logger.info(f"Pause action initiated for {log_name}")
         return action_response
 
     async def wait_for_workspace_status(
@@ -142,7 +142,7 @@ class CloudAPI:
         name: Optional[str] = None,
     ) -> bool:
         """Wait for workspace to reach target status."""
-        log_name = f"{name} ({workspace_id})" if name else workspace_id
+        log_name = name if name else workspace_id
         logger.info(
             f"Waiting for workspace {log_name} to reach status {target_status}"
         )

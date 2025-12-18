@@ -153,7 +153,7 @@ class OllamaProxy:
         self, model_name: str, user_id: str, context_length: Optional[int] = None
     ) -> Any:
         """Select and prepare the best GPU for the request."""
-        
+
         # Retry loop for race conditions
         max_retries = 3
         for attempt in range(max_retries):
@@ -170,7 +170,7 @@ class OllamaProxy:
 
             # Start GPU if needed
             if gpu_result.requires_gpu_startup:
-                logger.info(f"Starting GPU {gpu.gpu_id} for user {user_id}")
+                logger.info(f"Starting GPU {gpu.name} for user {user_id}")
                 success = await self.gpu_manager.start_gpu(gpu.gpu_id)
                 if not success:
                     raise HTTPException(
@@ -178,13 +178,32 @@ class OllamaProxy:
                         detail="Failed to start GPU",
                     )
 
+            # If GPU is STARTING, wait for it to become ready before reserving
+            # This handles the case where another request just started the GPU
+            if gpu.status == GPUModelStatus.STARTING:
+                logger.info(f"GPU {gpu.name} is starting, waiting for it to become ready...")
+                timeout = self.gpu_manager.timing_config.startup_timeout_seconds
+                start_time = asyncio.get_event_loop().time()
+
+                while (asyncio.get_event_loop().time() - start_time) < timeout:
+                    if gpu.status in [GPUModelStatus.IDLE, GPUModelStatus.MODEL_READY, GPUModelStatus.BUSY]:
+                        logger.info(f"GPU {gpu.name} is now ready (status: {gpu.status})")
+                        break
+                    await asyncio.sleep(2)  # Check every 2 seconds
+                else:
+                    logger.error(f"GPU {gpu.name} did not become ready within {timeout}s")
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail=f"GPU startup timeout after {timeout}s",
+                    )
+
             # Reserve the GPU (this might fail if someone else took the slot)
             reservation_success = await self.gpu_manager.reserve_gpu(gpu.gpu_id, user_id, model_name)
-            
+
             if reservation_success:
                 # Load model if needed
                 if gpu_result.requires_model_load:
-                    logger.info(f"Loading model {model_name} on GPU {gpu.name} ({gpu.gpu_id})")
+                    logger.info(f"Loading model {model_name} on GPU {gpu.name}")
                     try:
                         await self._ensure_model_loaded(gpu.ip_address, gpu.name, model_name, context_length)
 
@@ -193,19 +212,19 @@ class OllamaProxy:
                         gpu.update_model(model_info)
                         gpu.update_status(GPUModelStatus.MODEL_READY)
                     except Exception as e:
-                        logger.error(f"Failed to load model on {gpu.name} ({gpu.gpu_id}). Marking node as ERROR state.")
+                        logger.error(f"Failed to load model on {gpu.name}. Marking node as ERROR state.")
                         gpu.update_status(GPUModelStatus.ERROR)
-                        # We should also clear the reservation so it doesn't expire naturally, 
+                        # We should also clear the reservation so it doesn't expire naturally,
                         # but status=ERROR already prevents selection.
                         # Re-raise to stop the request
                         raise
 
                 return gpu_result
-            
+
             # If reservation failed, retry
-            logger.warning(f"Reservation failed for GPU {gpu.gpu_id}, retrying selection (attempt {attempt+1}/{max_retries})")
+            logger.warning(f"Reservation failed for GPU {gpu.name}, retrying selection (attempt {attempt+1}/{max_retries})")
             await asyncio.sleep(0.5)  # Small backoff
-            
+
         # If we get here, we failed to get a reservation after retries
         return gpu_result  # Return the last result (which might be failure or success but reservation failed)
 
