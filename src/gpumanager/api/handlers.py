@@ -32,6 +32,7 @@ from gpumanager.auth.models import AuthenticatedUser
 from gpumanager.cloud.api import CloudAPI
 from gpumanager.gpu.manager import GPUManager
 from gpumanager.gpu.models import GPUManagerStats
+from gpumanager.gpu.state import GPUModelStatus
 
 
 class HealthResponse(BaseModel):
@@ -129,10 +130,12 @@ class RequestHandler:
         app.post("/api/generate")(self._create_ollama_generate_handler())
         app.post("/api/chat")(self._create_ollama_chat_handler())
         app.post("/v1/chat/completions")(self._create_openai_chat_handler())
-        # Add this line in _create_app():
-        app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])(
-            self.ollama_passthrough
-        )
+        # Passthrough for all other Ollama endpoints (also requires authentication)
+        app.api_route(
+            "/api/{path:path}",
+            methods=["GET", "POST", "PUT", "DELETE"],
+            dependencies=[Depends(self.get_current_user)]
+        )(self.ollama_passthrough)
 
         return app
 
@@ -341,9 +344,16 @@ class RequestHandler:
 
         return openai_chat_completions
 
-    async def ollama_passthrough(self, request: Request, path: str = Path(...)):
-        """Pass-through proxy for any Ollama API endpoint."""
+    async def ollama_passthrough(
+        self,
+        request: Request,
+        path: str = Path(...)
+    ):
+        """Pass-through proxy for any Ollama API endpoint (authenticated)."""
         try:
+            # Get authenticated user from request state (set by auth dependency)
+            current_user = await self.get_current_user(request)
+
             # Parse request body first to extract model name if present
             body = None
             model_name = "unknown"  # Default for endpoints like /api/tags that don't need a model
@@ -356,43 +366,53 @@ class RequestHandler:
                         # /api/show uses "name", others use "model"
                         model_name = body.get("model") or body.get("name") or "unknown"
                         if model_name != "unknown":
-                            logger.info(f"Passthrough: Extracted model '{model_name}' from /{path} request")
+                            logger.debug(f"User {current_user.name}: Extracted model '{model_name}' from /{path} request")
                 except Exception as e:
                     logger.debug(f"Failed to parse request body for /{path}: {e}")
                     pass
 
-            # Get any available GPU
-            # We use select_gpu with a model request to find the best GPU
-            # This ensures we respect slot limits and prefer GPUs with the model loaded
-            from gpumanager.gpu.models import GPUSelectionRequest
+            # Use the authenticated user's identity
+            user_id = current_user.name
+            logger.debug(f"Passthrough /{path} for user {user_id}, model {model_name}")
+            
+            # 1. Find any running GPU (don't use select_gpu which might start new GPUs)
+            # Passthrough requests should use already-running GPUs, even if busy
+            gpu = None
 
-            # Use a dummy user ID for passthrough requests if not authenticated
-            # Ideally this endpoint should be authenticated too, but for now we'll use a placeholder
-            user_id = "passthrough_user"
+            # First, try to find a GPU with the model loaded (if model specified)
+            if model_name != "unknown":
+                for g in self.gpu_manager.gpus.values():
+                    if g.has_model_loaded(model_name) and g.status in [GPUModelStatus.IDLE, GPUModelStatus.MODEL_READY, GPUModelStatus.BUSY]:
+                        gpu = g
+                        logger.info(f"Passthrough using GPU {g.name} with model {model_name} loaded")
+                        break
 
-            selection_request = GPUSelectionRequest(
-                user_id=user_id,
-                model_name=model_name,
-                context_length=None
-            )
-            
-            # 1. Select GPU
-            gpu_result = await self.gpu_manager.select_gpu(selection_request)
-            
-            if not gpu_result.gpu_info:
-                raise HTTPException(status_code=503, detail="No GPUs available")
-                
-            gpu = gpu_result.gpu_info
-            
-            # 2. Start GPU if needed
-            if gpu_result.requires_gpu_startup:
-                logger.info(f"Passthrough selected paused GPU, starting {gpu.name}...")
-                try:
-                    if not await self.gpu_manager.start_gpu(gpu.gpu_id):
-                        raise HTTPException(status_code=500, detail="Failed to start GPU")
-                except Exception:
-                    logger.warning(f"Startup failed for {gpu.name}")
-                    raise
+            # If no GPU with model, just use any running GPU
+            if not gpu:
+                for g in self.gpu_manager.gpus.values():
+                    if g.status in [GPUModelStatus.IDLE, GPUModelStatus.MODEL_READY, GPUModelStatus.BUSY, GPUModelStatus.STARTING]:
+                        gpu = g
+                        logger.info(f"Passthrough using any running GPU: {g.name}")
+                        break
+
+            # If no running GPU found, start one
+            if not gpu:
+                logger.info(f"Passthrough: No running GPUs, selecting one to start...")
+                gpu_result = await self.gpu_manager.select_gpu(selection_request)
+
+                if not gpu_result.gpu_info:
+                    raise HTTPException(status_code=503, detail="No GPUs available")
+
+                gpu = gpu_result.gpu_info
+
+                if gpu_result.requires_gpu_startup:
+                    logger.info(f"Passthrough starting GPU {gpu.name}...")
+                    try:
+                        if not await self.gpu_manager.start_gpu(gpu.gpu_id):
+                            raise HTTPException(status_code=500, detail="Failed to start GPU")
+                    except Exception:
+                        logger.warning(f"Startup failed for {gpu.name}")
+                        raise
 
             # Passthrough requests don't reserve or count against slots
             # They just proxy through and wait if the GPU is busy
