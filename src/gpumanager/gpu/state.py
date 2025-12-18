@@ -88,7 +88,7 @@ class GPUInfo(BaseModel):
     requests_today: int = Field(default=0, description="Requests processed today")
 
     # Slot management
-    max_slots: int = Field(default=1, description="Maximum concurrent requests")
+    max_slots: int = Field(default=3, description="Maximum concurrent requests")
     active_requests: int = Field(default=0, description="Current active requests")
 
     def update_status(self, new_status: GPUModelStatus) -> None:

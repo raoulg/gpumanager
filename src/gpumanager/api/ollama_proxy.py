@@ -26,12 +26,47 @@ class OllamaProxy:
     def __init__(self, gpu_manager: GPUManager):
         """Initialize Ollama proxy."""
         self.gpu_manager = gpu_manager
+        # Track active requests per user to prevent concurrent requests from same user
+        self.active_user_requests: Dict[str, asyncio.Lock] = {}
+        self.user_request_timeout = 120  # 2 minutes timeout for queued requests
         logger.info("Initialized OllamaProxy")
+
+    async def _acquire_user_lock(self, user_id: str) -> asyncio.Lock:
+        """Acquire a lock for a user to prevent concurrent requests.
+
+        If the user already has an active request, this will wait (queue) with a timeout.
+        If the wait exceeds the timeout, raises an HTTPException.
+        """
+        # Get or create lock for this user
+        if user_id not in self.active_user_requests:
+            self.active_user_requests[user_id] = asyncio.Lock()
+
+        user_lock = self.active_user_requests[user_id]
+
+        # Try to acquire lock with timeout
+        try:
+            logger.debug(f"User {user_id} attempting to acquire request lock...")
+            acquired = await asyncio.wait_for(
+                user_lock.acquire(),
+                timeout=self.user_request_timeout
+            )
+            if acquired or user_lock.locked():
+                logger.info(f"User {user_id} acquired request lock")
+                return user_lock
+        except asyncio.TimeoutError:
+            logger.warning(f"User {user_id} request timed out waiting for previous request (waited {self.user_request_timeout}s)")
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Your previous request is still processing. Please wait for it to complete before sending a new request. (Timeout: {self.user_request_timeout}s)"
+            )
 
     async def generate(
         self, request: OllamaGenerateRequest, user: AuthenticatedUser
     ) -> StreamingResponse:
         """Handle /api/generate requests with intelligent GPU routing."""
+        # Acquire per-user lock to prevent concurrent requests from same user
+        user_lock = await self._acquire_user_lock(user.name)
+
         try:
             # Select the best GPU for this request
             gpu_result = await self._select_and_prepare_gpu(
@@ -80,11 +115,19 @@ class OllamaProxy:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Internal server error: {str(e)}",
             )
+        finally:
+            # Release user lock
+            if user_lock.locked():
+                user_lock.release()
+                logger.debug(f"User {user.name} released request lock")
 
     async def chat(
         self, request: OllamaChatRequest, user: AuthenticatedUser
     ) -> StreamingResponse:
         """Handle /api/chat requests with intelligent GPU routing."""
+        # Acquire per-user lock to prevent concurrent requests from same user
+        user_lock = await self._acquire_user_lock(user.name)
+
         try:
             # Select the best GPU for this request
             gpu_result = await self._select_and_prepare_gpu(
@@ -130,6 +173,11 @@ class OllamaProxy:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Internal server error: {str(e)}",
             )
+        finally:
+            # Release user lock
+            if user_lock.locked():
+                user_lock.release()
+                logger.debug(f"User {user.name} released request lock")
 
     async def openai_chat_completions(
         self, request: OpenAIChatRequest, user: AuthenticatedUser

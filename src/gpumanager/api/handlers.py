@@ -344,18 +344,35 @@ class RequestHandler:
     async def ollama_passthrough(self, request: Request, path: str = Path(...)):
         """Pass-through proxy for any Ollama API endpoint."""
         try:
+            # Parse request body first to extract model name if present
+            body = None
+            model_name = "unknown"  # Default for endpoints like /api/tags that don't need a model
+
+            if request.method in ["POST", "PUT", "PATCH"]:
+                try:
+                    body = await request.json()
+                    # Try to extract model name from common Ollama API patterns
+                    if isinstance(body, dict):
+                        # /api/show uses "name", others use "model"
+                        model_name = body.get("model") or body.get("name") or "unknown"
+                        if model_name != "unknown":
+                            logger.info(f"Passthrough: Extracted model '{model_name}' from /{path} request")
+                except Exception as e:
+                    logger.debug(f"Failed to parse request body for /{path}: {e}")
+                    pass
+
             # Get any available GPU
-            # We use select_gpu with a dummy model request to find an available GPU
-            # This ensures we respect slot limits
+            # We use select_gpu with a model request to find the best GPU
+            # This ensures we respect slot limits and prefer GPUs with the model loaded
             from gpumanager.gpu.models import GPUSelectionRequest
-            
+
             # Use a dummy user ID for passthrough requests if not authenticated
             # Ideally this endpoint should be authenticated too, but for now we'll use a placeholder
             user_id = "passthrough_user"
-            
+
             selection_request = GPUSelectionRequest(
-                user_id=user_id, 
-                model_name="unknown", # We don't know the model here easily without parsing body
+                user_id=user_id,
+                model_name=model_name,
                 context_length=None
             )
             
@@ -367,35 +384,22 @@ class RequestHandler:
                 
             gpu = gpu_result.gpu_info
             
-            # 2. Start GPU if needed (BEFORE reserving)
+            # 2. Start GPU if needed
             if gpu_result.requires_gpu_startup:
                 logger.info(f"Passthrough selected paused GPU, starting {gpu.name}...")
                 try:
                     if not await self.gpu_manager.start_gpu(gpu.gpu_id):
-                        # Use 500 explicitly
                         raise HTTPException(status_code=500, detail="Failed to start GPU")
                 except Exception:
                     logger.warning(f"Startup failed for {gpu.name}")
                     raise
 
-            # 2.1 Reserve GPU (to claim a slot)
-            if not await self.gpu_manager.reserve_gpu(gpu.gpu_id, user_id):
-                 raise HTTPException(status_code=503, detail="Failed to reserve GPU slot")
-
-            # Get request body if present
-            body = None
-            if request.method in ["POST", "PUT", "PATCH"]:
-                try:
-                    body = await request.json()
-                except:
-                    pass
-
-            # 3. Mark as busy
-            logger.debug(f"Starting passthrough request on GPU {gpu.name}")
-            gpu.start_request(user_id)
+            # Passthrough requests don't reserve or count against slots
+            # They just proxy through and wait if the GPU is busy
+            logger.debug(f"Proxying passthrough request to GPU {gpu.name} (no reservation)")
 
             try:
-                # Proxy the request
+                # Proxy the request directly without reserving
                 import httpx
 
                 async with httpx.AsyncClient(timeout=60.0) as client:
@@ -407,10 +411,6 @@ class RequestHandler:
                     )
 
                     return JSONResponse(response.json() if response.content else {})
-            finally:
-                # 4. Release slot
-                logger.debug(f"Finishing passthrough request on GPU {gpu.name}")
-                gpu.finish_request()
 
         except Exception as e:
             logger.error(f"Error in passthrough for /api/{path}: {e}")
