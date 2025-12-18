@@ -374,8 +374,15 @@ class RequestHandler:
             # 2.1 Start GPU if needed
             if gpu_result.requires_gpu_startup:
                 logger.info(f"Passthrough selected paused GPU, starting {gpu.gpu_id}...")
-                if not await self.gpu_manager.start_gpu(gpu.gpu_id):
-                    raise HTTPException(status_code=500, detail="Failed to start GPU")
+                try:
+                    if not await self.gpu_manager.start_gpu(gpu.gpu_id):
+                        # Use 500 explicitly
+                        raise HTTPException(status_code=500, detail="Failed to start GPU")
+                except Exception:
+                    # Clear reservation if startup fails
+                    logger.warning(f"Startup failed for {gpu.gpu_id}, clearing reservation")
+                    gpu.clear_reservation()
+                    raise
 
             # Get request body if present
             body = None
@@ -386,6 +393,7 @@ class RequestHandler:
                     pass
 
             # 3. Mark as busy
+            logger.debug(f"Starting passthrough request on GPU {gpu.gpu_id}")
             gpu.start_request(user_id)
             
             try:
@@ -403,6 +411,7 @@ class RequestHandler:
                     return JSONResponse(response.json() if response.content else {})
             finally:
                 # 4. Release slot
+                logger.debug(f"Finishing passthrough request on GPU {gpu.gpu_id}")
                 gpu.finish_request()
 
         except Exception as e:

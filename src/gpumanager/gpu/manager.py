@@ -134,6 +134,12 @@ class GPUManager:
         for gpu in self.gpus.values():
             if gpu.has_model_loaded(model_name) and gpu.is_available():
                 candidates.append(gpu)
+            elif gpu.has_model_loaded(model_name):
+                logger.debug(
+                    f"GPU {gpu.gpu_id} has model {model_name} but is not available. "
+                    f"Status: {gpu.status}, Active: {gpu.active_requests}/{gpu.max_slots}, "
+                    f"Reserved: {gpu.reservation is not None}"
+                )
         
         if not candidates:
             return None
@@ -145,14 +151,28 @@ class GPUManager:
         """Find an available GPU (prioritizing idle ones)."""
         # Pass 1: Check for IDLE GPUs (Preferred)
         for gpu in self.gpus.values():
-            if gpu.status == GPUModelStatus.IDLE and gpu.is_available():
-                return gpu
+            if gpu.status == GPUModelStatus.IDLE:
+                if gpu.is_available():
+                    return gpu
+                else:
+                    logger.debug(
+                        f"Skipping IDLE GPU {gpu.gpu_id}: "
+                        f"Active: {gpu.active_requests}/{gpu.max_slots}, "
+                        f"Reserved: {gpu.reservation if gpu.reservation else 'No'}"
+                    )
                 
         # Pass 2: Check for MODEL_READY GPUs (Fallback)
         # We allow reusing these for generic requests to avoid waking up a paused GPU
         for gpu in self.gpus.values():
-            if gpu.status == GPUModelStatus.MODEL_READY and gpu.is_available():
-                return gpu
+            if gpu.status == GPUModelStatus.MODEL_READY:
+                if gpu.is_available():
+                    return gpu
+                else:
+                    logger.debug(
+                        f"Skipping MODEL_READY GPU {gpu.gpu_id}: consumed by {gpu.loaded_model.name if gpu.loaded_model else 'Unknown'}. "
+                        f"Active: {gpu.active_requests}/{gpu.max_slots}, "
+                        f"Reserved: {gpu.reservation if gpu.reservation else 'No'}"
+                    )
                 
         return None
 
