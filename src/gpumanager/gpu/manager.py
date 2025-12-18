@@ -214,13 +214,13 @@ class GPUManager:
 
         gpu = self.gpus[gpu_id]
         if gpu.status != GPUModelStatus.PAUSED:
-            logger.warning(f"GPU {gpu_id} is not paused, current status: {gpu.status}")
+            logger.warning(f"GPU {gpu.name} ({gpu.gpu_id}) is not paused, current status: {gpu.status}")
             return False
 
         try:
             # Update status to starting
             gpu.update_status(GPUModelStatus.STARTING)
-            logger.info(f"Starting GPU: {gpu_id}")
+            logger.info(f"Starting GPU: {gpu.name} ({gpu.gpu_id})")
 
             # Resume the workspace
             await self.cloud_api.resume_workspace(gpu_id)
@@ -234,16 +234,16 @@ class GPUManager:
 
             if success:
                 gpu.update_status(GPUModelStatus.IDLE)
-                logger.success(f"GPU {gpu_id} started successfully")
+                logger.success(f"GPU {gpu.name} ({gpu.gpu_id}) started successfully")
                 return True
             else:
                 gpu.update_status(GPUModelStatus.ERROR)
-                logger.error(f"GPU {gpu_id} failed to start within timeout")
+                logger.error(f"GPU {gpu.name} ({gpu.gpu_id}) failed to start within timeout")
                 return False
 
         except CloudAPIError as e:
             gpu.update_status(GPUModelStatus.ERROR)
-            logger.error(f"Failed to start GPU {gpu_id}: {e}")
+            logger.error(f"Failed to start GPU {gpu.name} ({gpu.gpu_id}): {e}")
             return False
 
     async def pause_gpu(self, gpu_id: str) -> bool:
@@ -256,12 +256,12 @@ class GPUManager:
         
         # Don't pause if there are active requests
         if gpu.active_requests > 0:
-            logger.warning(f"GPU {gpu_id} has active requests, cannot pause")
+            logger.warning(f"GPU {gpu.name} ({gpu.gpu_id}) has active requests, cannot pause")
             return False
 
         if gpu.status not in [GPUModelStatus.IDLE, GPUModelStatus.MODEL_READY]:
             logger.warning(
-                f"GPU {gpu_id} cannot be paused, current status: {gpu.status}"
+                f"GPU {gpu.name} ({gpu.gpu_id}) cannot be paused, current status: {gpu.status}"
             )
             return False
 
@@ -269,19 +269,19 @@ class GPUManager:
             # Update status to pausing
             gpu.update_status(GPUModelStatus.PAUSING)
             gpu.update_model(None)  # Clear loaded model
-            logger.info(f"Pausing GPU: {gpu_id}")
+            logger.info(f"Pausing GPU: {gpu.name} ({gpu.gpu_id})")
 
             # Pause the workspace
             await self.cloud_api.pause_workspace(gpu_id)
 
             # Update status immediately (don't wait for confirmation)
             gpu.update_status(GPUModelStatus.PAUSED)
-            logger.success(f"GPU {gpu_id} paused successfully")
+            logger.success(f"GPU {gpu.name} ({gpu.gpu_id}) paused successfully")
             return True
 
         except CloudAPIError as e:
             gpu.update_status(GPUModelStatus.ERROR)
-            logger.error(f"Failed to pause GPU {gpu_id}: {e}")
+            logger.error(f"Failed to pause GPU {gpu.name} ({gpu.gpu_id}): {e}")
             return False
 
     async def reserve_gpu(
@@ -314,7 +314,7 @@ class GPUManager:
             model_name=model_name,
         )
 
-        logger.debug(f"Reserved GPU {gpu_id} for user {user_id}")
+        logger.debug(f"Reserved GPU {gpu.name} ({gpu.gpu_id}) for user {user_id}")
         return True
 
     def get_gpu_stats(self) -> GPUManagerStats:
@@ -369,8 +369,9 @@ class GPUManager:
             try:
                 for gpu in self.gpus.values():
                     if gpu.is_idle_too_long(self.timing_config.reservation_minutes):
-                        logger.info(f"GPU {gpu.gpu_id} idle too long, pausing...")
-                        await self.pause_gpu(gpu.gpu_id)
+                        logger.info(f"GPU {gpu.name} ({gpu.gpu_id}) idle too long, pausing...")
+                        # Launch pause as a background task to not block the loop
+                        asyncio.create_task(self.pause_gpu(gpu.gpu_id))
 
                 # Check every minute
                 await asyncio.sleep(60)
@@ -386,7 +387,7 @@ class GPUManager:
                 for gpu in self.gpus.values():
                     if gpu.reservation and gpu.reservation.is_expired():
                         logger.debug(
-                            f"Clearing expired reservation on GPU {gpu.gpu_id}"
+                            f"Clearing expired reservation on GPU {gpu.name} ({gpu.gpu_id})"
                         )
                         gpu.clear_reservation()
 
