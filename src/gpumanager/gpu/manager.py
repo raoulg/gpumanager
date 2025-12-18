@@ -142,38 +142,61 @@ class GPUManager:
                 )
         
         if not candidates:
+            logger.debug(f"No GPUs found with model {model_name} loaded")
             return None
             
         # Return the one with fewest active requests
-        return sorted(candidates, key=lambda g: g.active_requests)[0]
+        # Log all candidates
+        logger.debug(f"Found {len(candidates)} GPUs with model {model_name}: {[g.gpu_id for g in candidates]}")
+        selected = sorted(candidates, key=lambda g: g.active_requests)[0]
+        logger.debug(f"Selected GPU with model: {selected.gpu_id}")
+        return selected
 
     def _find_available_gpu(self) -> Optional[GPUInfo]:
         """Find an available GPU (prioritizing idle ones)."""
         # Pass 1: Check for IDLE GPUs (Preferred)
+        idle_candidates = []
         for gpu in self.gpus.values():
             if gpu.status == GPUModelStatus.IDLE:
                 if gpu.is_available():
-                    return gpu
+                    idle_candidates.append(gpu)
                 else:
                     logger.debug(
                         f"Skipping IDLE GPU {gpu.gpu_id}: "
                         f"Active: {gpu.active_requests}/{gpu.max_slots}, "
                         f"Reserved: {gpu.reservation if gpu.reservation else 'No'}"
                     )
+        
+        if idle_candidates:
+            logger.debug(f"Found {len(idle_candidates)} IDLE and available GPUs: {[g.gpu_id for g in idle_candidates]}")
+            # For now, just pick the first one, but logging gives us visibility
+            # Use sort to ensure deterministic behavior? Or just rely on list order.
+            # Iteration order of dict values is insertion order.
+            selected = idle_candidates[0]
+            logger.debug(f"Selected IDLE GPU: {selected.gpu_id}")
+            return selected
                 
         # Pass 2: Check for MODEL_READY GPUs (Fallback)
         # We allow reusing these for generic requests to avoid waking up a paused GPU
+        ready_candidates = []
         for gpu in self.gpus.values():
             if gpu.status == GPUModelStatus.MODEL_READY:
                 if gpu.is_available():
-                    return gpu
+                    ready_candidates.append(gpu)
                 else:
                     logger.debug(
                         f"Skipping MODEL_READY GPU {gpu.gpu_id}: consumed by {gpu.loaded_model.name if gpu.loaded_model else 'Unknown'}. "
                         f"Active: {gpu.active_requests}/{gpu.max_slots}, "
                         f"Reserved: {gpu.reservation if gpu.reservation else 'No'}"
                     )
-                
+        
+        if ready_candidates:
+             logger.debug(f"Found {len(ready_candidates)} MODEL_READY and available GPUs (for reuse): {[g.gpu_id for g in ready_candidates]}")
+             selected = ready_candidates[0]
+             logger.debug(f"Selected MODEL_READY GPU: {selected.gpu_id}")
+             return selected
+             
+        logger.debug("No available IDLE or MODEL_READY GPUs found in _find_available_gpu")
         return None
 
     def _find_paused_gpu(self) -> Optional[GPUInfo]:
