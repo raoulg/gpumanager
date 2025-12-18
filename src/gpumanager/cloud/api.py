@@ -94,40 +94,43 @@ class CloudAPI:
         logger.info(f"Found {len(workspace_list.results)} workspaces")
         return workspace_list.results
 
-    async def get_workspace(self, workspace_id: str) -> Workspace:
+    async def get_workspace(self, workspace_id: str, name: Optional[str] = None) -> Workspace:
         """Get specific workspace details."""
         endpoint = f"/workspace/workspaces/{workspace_id}/"
 
-        logger.info(f"Getting workspace details: {workspace_id}")
+        log_name = f"{name} ({workspace_id})" if name else workspace_id
+        logger.info(f"Getting workspace details: {log_name}")
 
         response_data = await self._make_request("GET", endpoint)
         workspace = Workspace(**response_data)
 
-        logger.info(f"Workspace {workspace_id} status: {workspace.status}")
+        logger.info(f"Workspace {log_name} status: {workspace.status}")
         return workspace
 
-    async def resume_workspace(self, workspace_id: str) -> ActionResponse:
+    async def resume_workspace(self, workspace_id: str, name: Optional[str] = None) -> ActionResponse:
         """Resume a paused workspace."""
         endpoint = f"/workspace/workspaces/{workspace_id}/actions/resume/"
 
-        logger.info(f"Resuming workspace: {workspace_id}")
+        log_name = f"{name} ({workspace_id})" if name else workspace_id
+        logger.info(f"Resuming workspace: {log_name}")
 
         response_data = await self._make_request("POST", endpoint, json_data={})
         action_response = ActionResponse(**response_data)
 
-        logger.info(f"Resume action initiated: {action_response.id}")
+        logger.info(f"Resume action initiated for {log_name}: {action_response.id}")
         return action_response
 
-    async def pause_workspace(self, workspace_id: str) -> ActionResponse:
+    async def pause_workspace(self, workspace_id: str, name: Optional[str] = None) -> ActionResponse:
         """Pause an active workspace."""
         endpoint = f"/workspace/workspaces/{workspace_id}/actions/pause/"
 
-        logger.info(f"Pausing workspace: {workspace_id}")
+        log_name = f"{name} ({workspace_id})" if name else workspace_id
+        logger.info(f"Pausing workspace: {log_name}")
 
         response_data = await self._make_request("POST", endpoint, json_data={})
         action_response = ActionResponse(**response_data)
 
-        logger.info(f"Pause action initiated: {action_response.id}")
+        logger.info(f"Pause action initiated for {log_name}: {action_response.id}")
         return action_response
 
     async def wait_for_workspace_status(
@@ -136,34 +139,36 @@ class CloudAPI:
         target_status: WorkspaceStatus,
         timeout_seconds: int = 120,
         poll_interval: int = 10,
+        name: Optional[str] = None,
     ) -> bool:
         """Wait for workspace to reach target status."""
+        log_name = f"{name} ({workspace_id})" if name else workspace_id
         logger.info(
-            f"Waiting for workspace {workspace_id} to reach status {target_status}"
+            f"Waiting for workspace {log_name} to reach status {target_status}"
         )
 
         elapsed = 0
         while elapsed < timeout_seconds:
-            workspace = await self.get_workspace(workspace_id)
+            workspace = await self.get_workspace(workspace_id, name)
 
             if workspace.status == target_status:
                 logger.success(
-                    f"Workspace {workspace_id} reached status {target_status}"
+                    f"Workspace {log_name} reached status {target_status}"
                 )
                 return True
 
             if workspace.status == WorkspaceStatus.UNKNOWN:
-                logger.warning(f"Workspace {workspace_id} in unknown status")
+                logger.warning(f"Workspace {log_name} in unknown status")
 
             await asyncio.sleep(poll_interval)
             elapsed += poll_interval
 
             logger.debug(
-                f"Workspace {workspace_id} status: {workspace.status} (elapsed: {elapsed}s)"
+                f"Workspace {log_name} status: {workspace.status} (elapsed: {elapsed}s)"
             )
 
         logger.error(
-            f"Timeout waiting for workspace {workspace_id} to reach status {target_status}"
+            f"Timeout waiting for workspace {log_name} to reach status {target_status}"
         )
         return False
 

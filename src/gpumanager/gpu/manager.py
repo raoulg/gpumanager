@@ -105,7 +105,20 @@ class GPUManager:
                 message=f"GPU available, will load {request.model_name}",
             )
 
-        # 3. Check for paused GPU that can be started
+        # 3. Check for STARTING GPU (Wait for it instead of starting new one)
+        # This prevents double-startup race conditions
+        starting_gpu = self._find_starting_gpu()
+        if starting_gpu:
+             logger.debug(f"Found STARTING GPU, waiting for it: {starting_gpu.name} ({starting_gpu.gpu_id})")
+             return GPUSelectionResult(
+                gpu_info=starting_gpu,
+                estimated_wait_seconds=self.timing_config.startup_timeout_seconds, # Conservative estimate
+                requires_model_load=True, # Will likely need to load model once up
+                requires_gpu_startup=False, # Already starting!
+                message=f"Waiting for GPU {starting_gpu.name} to start...",
+            )
+
+        # 4. Check for paused GPU that can be started
         paused_gpu = self._find_paused_gpu()
         if paused_gpu:
             logger.debug(f"Found paused GPU to wake up: {paused_gpu.gpu_id}")
@@ -117,7 +130,7 @@ class GPUManager:
                 message=f"Will start GPU and load {request.model_name}",
             )
 
-        # 4. No GPUs available
+        # 5. No GPUs available
         logger.warning("No GPUs available for request")
         return GPUSelectionResult(
             gpu_info=None,
@@ -126,6 +139,13 @@ class GPUManager:
             requires_gpu_startup=False,
             message="All GPUs are busy, please try again later",
         )
+
+    def _find_starting_gpu(self) -> Optional[GPUInfo]:
+        """Find a GPU that is currently starting."""
+        for gpu in self.gpus.values():
+            if gpu.status == GPUModelStatus.STARTING:
+                 return gpu
+        return None
 
     def _find_gpu_with_model(self, model_name: str) -> Optional[GPUInfo]:
         """Find a GPU that already has the model loaded."""
@@ -136,7 +156,7 @@ class GPUManager:
                 candidates.append(gpu)
             elif gpu.has_model_loaded(model_name):
                 logger.debug(
-                    f"GPU {gpu.gpu_id} has model {model_name} but is not available. "
+                    f"GPU {gpu.name} ({gpu.gpu_id}) has model {model_name} but is not available. "
                     f"Status: {gpu.status}, Active: {gpu.active_requests}/{gpu.max_slots}, "
                     f"Reserved: {gpu.reservation is not None}"
                 )
@@ -149,7 +169,7 @@ class GPUManager:
         # Log all candidates
         logger.debug(f"Found {len(candidates)} GPUs with model {model_name}: {[g.gpu_id for g in candidates]}")
         selected = sorted(candidates, key=lambda g: g.active_requests)[0]
-        logger.debug(f"Selected GPU with model: {selected.gpu_id}")
+        logger.debug(f"Selected GPU with model: {selected.name} ({selected.gpu_id})")
         return selected
 
     def _find_available_gpu(self) -> Optional[GPUInfo]:
@@ -162,18 +182,15 @@ class GPUManager:
                     idle_candidates.append(gpu)
                 else:
                     logger.debug(
-                        f"Skipping IDLE GPU {gpu.gpu_id}: "
+                        f"Skipping IDLE GPU {gpu.name} ({gpu.gpu_id}): "
                         f"Active: {gpu.active_requests}/{gpu.max_slots}, "
                         f"Reserved: {gpu.reservation if gpu.reservation else 'No'}"
                     )
         
         if idle_candidates:
             logger.debug(f"Found {len(idle_candidates)} IDLE and available GPUs: {[g.gpu_id for g in idle_candidates]}")
-            # For now, just pick the first one, but logging gives us visibility
-            # Use sort to ensure deterministic behavior? Or just rely on list order.
-            # Iteration order of dict values is insertion order.
             selected = idle_candidates[0]
-            logger.debug(f"Selected IDLE GPU: {selected.gpu_id}")
+            logger.debug(f"Selected IDLE GPU: {selected.name} ({selected.gpu_id})")
             return selected
                 
         # Pass 2: Check for MODEL_READY GPUs (Fallback)
@@ -185,7 +202,7 @@ class GPUManager:
                     ready_candidates.append(gpu)
                 else:
                     logger.debug(
-                        f"Skipping MODEL_READY GPU {gpu.gpu_id}: consumed by {gpu.loaded_model.name if gpu.loaded_model else 'Unknown'}. "
+                        f"Skipping MODEL_READY GPU {gpu.name} ({gpu.gpu_id}): consumed by {gpu.loaded_model.name if gpu.loaded_model else 'Unknown'}. "
                         f"Active: {gpu.active_requests}/{gpu.max_slots}, "
                         f"Reserved: {gpu.reservation if gpu.reservation else 'No'}"
                     )
@@ -193,7 +210,7 @@ class GPUManager:
         if ready_candidates:
              logger.debug(f"Found {len(ready_candidates)} MODEL_READY and available GPUs (for reuse): {[g.gpu_id for g in ready_candidates]}")
              selected = ready_candidates[0]
-             logger.debug(f"Selected MODEL_READY GPU: {selected.gpu_id}")
+             logger.debug(f"Selected MODEL_READY GPU: {selected.name} ({selected.gpu_id})")
              return selected
              
         logger.debug("No available IDLE or MODEL_READY GPUs found in _find_available_gpu")
@@ -223,19 +240,26 @@ class GPUManager:
             logger.info(f"Starting GPU: {gpu.name} ({gpu.gpu_id})")
 
             # Resume the workspace
-            await self.cloud_api.resume_workspace(gpu_id)
+            await self.cloud_api.resume_workspace(gpu_id, name=gpu.name)
 
-            # Wait for GPU to be ready
+            # Wait for GPU to be ready (VM running)
             success = await self.cloud_api.wait_for_workspace_status(
                 gpu_id,
                 WorkspaceStatus.RUNNING,
                 timeout_seconds=self.timing_config.startup_timeout_seconds,
+                name=gpu.name,
             )
 
             if success:
-                gpu.update_status(GPUModelStatus.IDLE)
-                logger.success(f"GPU {gpu.name} ({gpu.gpu_id}) started successfully")
-                return True
+                # Wait for Ollama service to be ready
+                if await self._wait_for_ollama_ready(gpu):
+                     gpu.update_status(GPUModelStatus.IDLE)
+                     logger.success(f"GPU {gpu.name} ({gpu.gpu_id}) started and ready")
+                     return True
+                else:
+                     logger.error(f"GPU {gpu.name} VM running but Ollama not ready")
+                     gpu.update_status(GPUModelStatus.ERROR)
+                     return False
             else:
                 gpu.update_status(GPUModelStatus.ERROR)
                 logger.error(f"GPU {gpu.name} ({gpu.gpu_id}) failed to start within timeout")
@@ -245,6 +269,29 @@ class GPUManager:
             gpu.update_status(GPUModelStatus.ERROR)
             logger.error(f"Failed to start GPU {gpu.name} ({gpu.gpu_id}): {e}")
             return False
+
+    async def _wait_for_ollama_ready(self, gpu: GPUInfo, timeout: int = 60) -> bool:
+        """Wait for Ollama service to be ready on the GPU."""
+        import httpx
+        logger.info(f"Waiting for Ollama service on {gpu.name} ({gpu.ip_address})...")
+        start_time = asyncio.get_event_loop().time()
+        
+        while (asyncio.get_event_loop().time() - start_time) < timeout:
+            try:
+                async with httpx.AsyncClient(timeout=2.0) as client:
+                    # Check /api/tags or just / (if Ollama has root)
+                    # /api/tags is standard
+                    resp = await client.get(f"http://{gpu.ip_address}:11434/api/tags")
+                    if resp.status_code == 200:
+                        logger.debug(f"Ollama ready on {gpu.name}")
+                        return True
+            except Exception:
+                pass
+            
+            await asyncio.sleep(2)
+            
+        logger.error(f"Timed out waiting for Ollama on {gpu.name}")
+        return False
 
     async def pause_gpu(self, gpu_id: str) -> bool:
         """Pause an idle GPU."""
@@ -272,7 +319,7 @@ class GPUManager:
             logger.info(f"Pausing GPU: {gpu.name} ({gpu.gpu_id})")
 
             # Pause the workspace
-            await self.cloud_api.pause_workspace(gpu_id)
+            await self.cloud_api.pause_workspace(gpu_id, name=gpu.name)
 
             # Update status immediately (don't wait for confirmation)
             gpu.update_status(GPUModelStatus.PAUSED)
