@@ -38,10 +38,12 @@ class DeploymentManager:
             elapsed += interval
         return False
 
-    async def run_remote_command(self, ip: str, command: str, description: str = "", log_error: bool = True) -> bool:
+    async def run_remote_command(self, ip: str, command: str, description: str = "", log_error: bool = True, log_name: Optional[str] = None) -> bool:
         """Run a remote command via SSH."""
+        display = f"[{log_name}]" if log_name else f"[{ip}]"
+        
         if description:
-            logger.info(f"[{ip}] {description}")
+            logger.info(f"{display} {description}")
         
         ssh_cmd = [
             "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
@@ -58,8 +60,8 @@ class DeploymentManager:
         
         if proc.returncode != 0:
             if log_error:
-                logger.error(f"[{ip}] Command failed: {command}")
-                logger.error(f"[{ip}] Error: {stderr.decode().strip()}")
+                logger.error(f"{display} Command failed: {command}")
+                logger.error(f"{display} Error: {stderr.decode().strip()}")
             return False
         
         return True
@@ -81,18 +83,18 @@ class DeploymentManager:
 
         # 1. Wait for SSH availability
         if not await self.wait_for_ssh(ip):
-            logger.error(f"[{ip}] SSH not available after timeout. Skipping.")
+            logger.error(f"[{workspace_name}] SSH not available after timeout. Skipping.")
             return
 
         # 2. Setup Remote Environment
         REMOTE_DIR = "~/gpu-node-install"
         SETUP_CMD = f"sudo bash setup.sh --shared --user {username}"
 
-        if not await self.run_remote_command(ip, f"mkdir -p {REMOTE_DIR}", "Creating remote directory"):
+        if not await self.run_remote_command(ip, f"mkdir -p {REMOTE_DIR}", "Creating remote directory", log_name=workspace_name):
             return
 
         # 3. Copy Files
-        logger.info(f"[{ip}] Copying installation files...")
+        logger.info(f"[{workspace_name}] Copying installation files...")
         # Assume we are running from project root, or we need to find the files relative to this package
         # Better: use project root relative paths assuming CWD is project root (standard for CLI)
         # OR find resources relative to package. For now assuming CWD is project root.
@@ -124,36 +126,48 @@ class DeploymentManager:
         proc = await asyncio.create_subprocess_exec(*scp_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
         _, stderr = await proc.communicate()
         if proc.returncode != 0:
-             logger.error(f"[{ip}] SCP failed: {stderr.decode()}")
+             logger.error(f"[{workspace_name}] SCP failed: {stderr.decode()}")
              return
 
-        # 4. Run Setup
         # 4. Run Setup
         # We ALWAYS run setup to ensure configuration changes (docker-compose, env vars) are applied.
         # The setup.sh script is idempotent.
-        logger.info(f"[{ip}] Running setup script...")
-        if await self.run_remote_command(ip, f"cd {REMOTE_DIR} && {SETUP_CMD}"):
+        
+        # Robust wipe of OpenWebUI data (preserving Ollama models)
+        # We explicitly stop and remove the webui container first to unlock the volume.
+        wipe_cmd = (
+            "docker compose stop webui && "
+            "docker compose rm -f webui && "
+            "docker volume rm shared_open-webui_data || true"
+        )
+        logger.info(f"[{workspace_name}] Wiping OpenWebUI data (preserving models)...")
+        await self.run_remote_command(ip, wipe_cmd, "Wiping OpenWebUI data", log_name=workspace_name)
+
+        logger.info(f"[{workspace_name}] Running setup script...")
+        if await self.run_remote_command(ip, f"cd {REMOTE_DIR} && {SETUP_CMD}", log_name=workspace_name):
              await self.mark_remote_progress(ip, "SETUP_COMPLETED")
-             logger.success(f"[{ip}] Setup script completed successfully.")
+             logger.success(f"[{workspace_name}] Setup script completed successfully.")
         else:
-             logger.error(f"[{ip}] Setup script failed.")
+             logger.error(f"[{workspace_name}] Setup script failed.")
              return
 
         # 5. Verify Service
-        if await self.run_remote_command(ip, "curl -s localhost:11434 > /dev/null", "Verifying service health"):
-            logger.success(f"[{ip}] Service is UP and responding!")
-            logger.warning(f"[{ip}] Service does not seem to be responding on port 11434.")
+        if await self.run_remote_command(ip, "curl -s localhost:11434 > /dev/null", "Verifying service health", log_name=workspace_name):
+            logger.success(f"[{workspace_name}] Service is UP and responding!")
+        else:
+            logger.warning(f"[{workspace_name}] Service does not seem to be responding on port 11434.")
 
         # 6. Provision Admin User
-        await self.provision_admin_user(ip, "https") # Using https/http? Caddy on 8080 is http usually unless certs configured. Caddyfile says :8080 so http.
+        await self.provision_admin_user(ip, "http", log_name=workspace_name) # Using http as Caddy on 8080 is http by default for IP access.
         
-    async def provision_admin_user(self, ip: str, scheme: str = "http"):
+    async def provision_admin_user(self, ip: str, scheme: str = "http", log_name: Optional[str] = None):
         """Provision the admin user if not exists."""
         from gpumanager.config.loader import ConfigLoader
         import httpx
         import os
         
-        logger.info(f"[{ip}] Checking Admin user status...")
+        display = f"[{log_name}]" if log_name else f"[{ip}]"
+        logger.info(f"{display} Checking Admin user status...")
         
         # Load credentials (we assume they are in local .env since we just deployed them)
         # Better: pass them in args, but lazy loading from file is okay for this CLI tool
@@ -172,7 +186,7 @@ class DeploymentManager:
             return
 
         # URL for signup
-        url = f"{scheme}://{ip}:8080/api/v1/auth/signup"
+        url = f"{scheme}://{ip}:8080/api/v1/auths/signup"
         
         # Payload
         payload = {
@@ -182,27 +196,45 @@ class DeploymentManager:
             "profile_image_url": ""
         }
         
-        try:
-           async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
-               response = await client.post(
-                   url, 
-                   json=payload,
-                   auth=("gatekeeper", gatekeeper_pass) # Basic Auth for Caddy
-               )
-               
-               if response.status_code == 200:
-                   logger.success(f"[{ip}] Admin user created successfully.")
-                   logger.info(f"[{ip}] Credentials: admin@gpumanager.local / {admin_pass}")
-               elif response.status_code == 400 and "Email already registered" in response.text:
-                   logger.info(f"[{ip}] Admin user already exists.")
-               else:
-                   logger.warning(f"[{ip}] Failed to create admin user: {response.status_code} {response.text}")
+        import asyncio
+        for attempt in range(24): # Try for 120 seconds (2 minutes)
+            try:
+               # Optional: log docker status for debugging if requested
+               # if attempt == 0:
+               #     await self.run_remote_command(ip, "docker ps | grep webui", "Checking container status", log_name=log_name)
+
+               async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+                   response = await client.post(
+                       url, 
+                       json=payload,
+                       auth=("gatekeeper", gatekeeper_pass) # Basic Auth for Caddy
+                   )
                    
-        except Exception as e:
-            logger.error(f"[{ip}] Error provisioning admin: {e}")
+                   if response.status_code == 200:
+                       logger.success(f"{display} Admin user created successfully.")
+                       logger.info(f"{display} Credentials: admin@gpumanager.local / {admin_pass}")
+                       break
+                   elif response.status_code == 400 and "Email already registered" in response.text:
+                       logger.info(f"{display} Admin user already exists.")
+                       break
+                   elif response.status_code == 502:
+                       logger.warning(f"{display} OpenWebUI starting up (502), retrying in 5s... ({attempt+1}/24)")
+                       await asyncio.sleep(5)
+                       continue
+                   else:
+                       logger.warning(f"{display} Failed to create admin user: {response.status_code} {response.text}")
+                       # If 403 or other perm error, it means app IS up but rejecting us. Breaking is correct.
+                       # But for robustness we might want to log it clearly.
+                       break
+                       
+            except Exception as e:
+                logger.error(f"{display} Error provisioning admin: {e}")
+                # Don't break on connection error immediately, might be transient
+                await asyncio.sleep(5)
 
         # Cleanup
-        await self.run_remote_command(ip, f"rm -rf {REMOTE_DIR}", "Cleaning up remote directory")
+        REMOTE_DIR = "~/gpu-node-install"
+        await self.run_remote_command(ip, f"rm -rf {REMOTE_DIR}", "Cleaning up remote directory", log_name=log_name)
 
     async def process_workspace(self, ws: Workspace, username: str):
         """Process a single workspace for deployment."""

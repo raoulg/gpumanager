@@ -167,57 +167,7 @@ def ensure_credentials():
             f.write("\n" + "\n".join(updates) + "\n")
         logger.success(f"Updated {env_path} with new credentials")
 
-def ensure_credentials():
-    """Ensure security credentials exist in gpu-node/.env."""
-    import secrets
-    import subprocess
-    
-    env_path = Path("gpu-node/.env")
-    if not env_path.exists():
-        logger.error(f"Environment file not found: {env_path}")
-        sys.exit(1)
-        
-    content = env_path.read_text()
-    updates = []
-    
-    # 1. WebUI Admin Password
-    if "WEBUI_ADMIN_PASSWORD=" not in content:
-        password = secrets.token_urlsafe(16)
-        updates.append(f"WEBUI_ADMIN_PASSWORD={password}")
-        logger.info("Generated new WEBUI_ADMIN_PASSWORD")
-        
-    # 2. Gatekeeper Password
-    gatekeeper_password = None
-    if "GATEKEEPER_PASSWORD=" not in content:
-        gatekeeper_password = secrets.token_urlsafe(16)
-        updates.append(f"GATEKEEPER_PASSWORD={gatekeeper_password}")
-        logger.info("Generated new GATEKEEPER_PASSWORD")
-    else:
-        # Extract existing if needed (parsing simple env file manually for robustness)
-        import dotenv
-        config = dotenv.dotenv_values(env_path)
-        gatekeeper_password = config.get("GATEKEEPER_PASSWORD")
 
-    # 3. Gatekeeper Hash
-    if "GATEKEEPER_HASH=" not in content and gatekeeper_password:
-        logger.info("Generating bcrypt hash for Gatekeeper...")
-        try:
-            # Use docker to generate hash since we don't have bcrypt
-            result = subprocess.run(
-                ["docker", "run", "--rm", "caddy:alpine", "caddy", "hash-password", "--plaintext", gatekeeper_password],
-                capture_output=True, text=True, check=True
-            )
-            hash_val = result.stdout.strip()
-            updates.append(f"GATEKEEPER_HASH='{hash_val}'")
-            logger.info("Generated GATEKEEPER_HASH")
-        except Exception as e:
-            logger.error(f"Failed to generate hash using docker: {e}")
-            sys.exit(1)
-
-    if updates:
-        with open(env_path, "a") as f:
-            f.write("\n" + "\n".join(updates) + "\n")
-        logger.success(f"Updated {env_path} with new credentials")
 
 
 def main():
@@ -291,6 +241,7 @@ def main():
         from gpumanager.deployment import DeploymentManager
         
         setup_logging()
+        ensure_credentials()
         
         # Load env vars to get SSH_USER if needed
         ConfigLoader.load_env_file()

@@ -15,6 +15,8 @@ class WorkspaceStatus(str, Enum):
     RESUMING = "resuming"
     PAUSING = "pausing"
     UPDATING = "updating"
+    DELETING = "deleting"
+    STOPPING = "stopping" # Added for completeness
     UNKNOWN = "unknown"
 
 

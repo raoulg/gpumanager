@@ -157,6 +157,28 @@ else
     curl -fsSL "$BASE_URL/entrypoint.sh" -o entrypoint.sh
 fi
 
+# Handle Caddyfile
+if [ -f "$SCRIPT_DIR/Caddyfile" ]; then
+    echo "Using local Caddyfile..."
+    if [ "$SHARED_SETUP" = true ]; then
+        if [ "$SCRIPT_DIR/Caddyfile" != "/srv/shared/Caddyfile" ]; then
+            # Fix: If Docker created a dir here by mistake, remove it
+            if [ -d "/srv/shared/Caddyfile" ]; then
+                echo "Removing stuck Caddyfile directory..."
+                rm -rf "/srv/shared/Caddyfile"
+            fi
+            cp "$SCRIPT_DIR/Caddyfile" /srv/shared/
+        fi
+    fi
+else
+    echo "Downloading Caddyfile..."
+    # If downloading, also ensure target isn't a dir
+    if [ -d "Caddyfile" ]; then
+         rm -rf "Caddyfile"
+    fi
+    curl -fsSL "$BASE_URL/Caddyfile" -o Caddyfile
+fi
+
 # Handle .env
 if [ -f "$SCRIPT_DIR/.env" ]; then
     echo "Using local .env..."
@@ -181,6 +203,9 @@ echo "Starting services in $(pwd)..."
 if ! nvidia-smi &> /dev/null; then
   echo "Warning: nvidia-smi failed. GPU might not be available."
 fi
+
+# Ensure clean state to prevent port conflicts
+docker compose down --remove-orphans || true
 
 docker compose up -d
 
