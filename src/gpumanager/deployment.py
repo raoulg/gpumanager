@@ -104,7 +104,7 @@ class DeploymentManager:
             return
 
         files_to_copy = [
-            "docker-compose.yml", "entrypoint.sh", "setup.sh", "install-docker.sh"
+            "docker-compose.yml", "entrypoint.sh", "setup.sh", "install-docker.sh", ".env", "Caddyfile"
         ]
         
         scp_args = []
@@ -128,22 +128,78 @@ class DeploymentManager:
              return
 
         # 4. Run Setup
-        if await self.check_remote_progress(ip, "SETUP_COMPLETED"):
-            logger.success(f"[{ip}] Setup already marked as completed. Skipping.")
+        # 4. Run Setup
+        # We ALWAYS run setup to ensure configuration changes (docker-compose, env vars) are applied.
+        # The setup.sh script is idempotent.
+        logger.info(f"[{ip}] Running setup script...")
+        if await self.run_remote_command(ip, f"cd {REMOTE_DIR} && {SETUP_CMD}"):
+             await self.mark_remote_progress(ip, "SETUP_COMPLETED")
+             logger.success(f"[{ip}] Setup script completed successfully.")
         else:
-            logger.info(f"[{ip}] Running setup script...")
-            if await self.run_remote_command(ip, f"cd {REMOTE_DIR} && {SETUP_CMD}"):
-                 await self.mark_remote_progress(ip, "SETUP_COMPLETED")
-                 logger.success(f"[{ip}] Setup script completed successfully.")
-            else:
-                 logger.error(f"[{ip}] Setup script failed.")
-                 return
+             logger.error(f"[{ip}] Setup script failed.")
+             return
 
         # 5. Verify Service
         if await self.run_remote_command(ip, "curl -s localhost:11434 > /dev/null", "Verifying service health"):
             logger.success(f"[{ip}] Service is UP and responding!")
-        else:
             logger.warning(f"[{ip}] Service does not seem to be responding on port 11434.")
+
+        # 6. Provision Admin User
+        await self.provision_admin_user(ip, "https") # Using https/http? Caddy on 8080 is http usually unless certs configured. Caddyfile says :8080 so http.
+        
+    async def provision_admin_user(self, ip: str, scheme: str = "http"):
+        """Provision the admin user if not exists."""
+        from gpumanager.config.loader import ConfigLoader
+        import httpx
+        import os
+        
+        logger.info(f"[{ip}] Checking Admin user status...")
+        
+        # Load credentials (we assume they are in local .env since we just deployed them)
+        # Better: pass them in args, but lazy loading from file is okay for this CLI tool
+        env_path = Path("gpu-node/.env")
+        if not env_path.exists():
+            logger.warning("No local .env found, skipping admin provision.")
+            return
+
+        import dotenv
+        config = dotenv.dotenv_values(env_path)
+        admin_pass = config.get("WEBUI_ADMIN_PASSWORD")
+        gatekeeper_pass = config.get("GATEKEEPER_PASSWORD")
+        
+        if not admin_pass or not gatekeeper_pass:
+            logger.warning("Missing admin or gatekeeper password in .env, skipping admin provision.")
+            return
+
+        # URL for signup
+        url = f"{scheme}://{ip}:8080/api/v1/auth/signup"
+        
+        # Payload
+        payload = {
+            "name": "Admin",
+            "email": "admin@gpumanager.local",
+            "password": admin_pass,
+            "profile_image_url": ""
+        }
+        
+        try:
+           async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+               response = await client.post(
+                   url, 
+                   json=payload,
+                   auth=("gatekeeper", gatekeeper_pass) # Basic Auth for Caddy
+               )
+               
+               if response.status_code == 200:
+                   logger.success(f"[{ip}] Admin user created successfully.")
+                   logger.info(f"[{ip}] Credentials: admin@gpumanager.local / {admin_pass}")
+               elif response.status_code == 400 and "Email already registered" in response.text:
+                   logger.info(f"[{ip}] Admin user already exists.")
+               else:
+                   logger.warning(f"[{ip}] Failed to create admin user: {response.status_code} {response.text}")
+                   
+        except Exception as e:
+            logger.error(f"[{ip}] Error provisioning admin: {e}")
 
         # Cleanup
         await self.run_remote_command(ip, f"rm -rf {REMOTE_DIR}", "Cleaning up remote directory")
@@ -165,13 +221,14 @@ class DeploymentManager:
             if ws.status != WorkspaceStatus.RUNNING:
                 if ws.can_resume:
                      logger.info(f"Resuming {ws.name}...")
-                     await self.cloud_api.resume_workspace(ws.id)
-                     if not await self.cloud_api.wait_for_workspace_status(ws.id, WorkspaceStatus.RUNNING):
+                     await self.cloud_api.resume_workspace(ws.id, name=ws.name)
+                     if not await self.cloud_api.wait_for_workspace_status(ws.id, WorkspaceStatus.RUNNING, name=ws.name):
                          logger.error(f"Failed to resume {ws.name}. Skipping.")
                          return
                      
+                     
                      # Fetch fresh details
-                     ws = await self.cloud_api.get_workspace(ws.id)
+                     ws = await self.cloud_api.get_workspace(ws.id, name=ws.name)
                      target_ip = ws.resource_meta.ip
                 else:
                     logger.warning(f"Workspace {ws.name} is in state {ws.status} and cannot be resumed. Skipping.")
@@ -185,7 +242,11 @@ class DeploymentManager:
             # Using 0.0.0.0/0 as verified by user curl.
             try:
                 logger.info(f"Configuring NSGs for {ws.name}...")
-                await self.cloud_api.update_nsgs(ws.id, ["in tcp 11434 11434 0.0.0.0/0"])
+                await self.cloud_api.update_nsgs(ws.id, [
+                    "in tcp 11434 11434 0.0.0.0/0",
+                    "in tcp 8080 8080 0.0.0.0/0",
+                    "out tcp 8080 8080 0.0.0.0/0"
+                ], name=ws.name)
             except Exception as e:
                 logger.error(f"Failed to update NSGs for {ws.name}: {e}")
                 # We don't return here because deployment might still work if ports were already open manually

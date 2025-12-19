@@ -172,7 +172,7 @@ class CloudAPI:
         )
         return False
 
-    async def update_nsgs(self, workspace_id: str, custom_rules: List[str]) -> ActionResponse:
+    async def update_nsgs(self, workspace_id: str, custom_rules: List[str], name: Optional[str] = None) -> ActionResponse:
         """Update Network Security Groups for a workspace.
         
         Note: SURF Research Cloud has mandatory immutable rules. This method handles
@@ -202,8 +202,9 @@ class CloudAPI:
         payload = {
             "network_security_group_rules": full_rules
         }
-
-        logger.info(f"Updating NSGs for workspace {workspace_id} with {len(formatted_custom_rules)} custom rules")
+        
+        log_name = name if name else workspace_id
+        logger.info(f"Updating NSGs for workspace {log_name} with {len(formatted_custom_rules)} custom rules")
         
         response_data = await self._make_request("POST", endpoint, json_data=payload)
         action_response = ActionResponse(**response_data)

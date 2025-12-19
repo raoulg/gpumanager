@@ -1,6 +1,7 @@
 """Main application entry point."""
 
 import sys
+import os
 from pathlib import Path
 
 import uvicorn
@@ -109,6 +110,116 @@ def generate_key(name: str, email: str):
         logger.error(f"Failed to generate key: {e}")
         sys.exit(1)
 
+def ensure_credentials():
+    """Ensure security credentials exist in gpu-node/.env."""
+    import secrets
+    import bcrypt
+    import base64
+    
+    env_path = Path("gpu-node/.env")
+    if not env_path.exists():
+        logger.error(f"Environment file not found: {env_path}")
+        sys.exit(1)
+        
+    content = env_path.read_text()
+    updates = []
+    
+    # 1. WebUI Admin Password
+    if "WEBUI_ADMIN_PASSWORD=" not in content:
+        password = secrets.token_urlsafe(16)
+        updates.append(f"WEBUI_ADMIN_PASSWORD={password}")
+        logger.info("Generated new WEBUI_ADMIN_PASSWORD")
+        
+    # 2. Gatekeeper Password
+    gatekeeper_password = None
+    if "GATEKEEPER_PASSWORD=" not in content:
+        gatekeeper_password = secrets.token_urlsafe(16)
+        updates.append(f"GATEKEEPER_PASSWORD={gatekeeper_password}")
+        logger.info("Generated new GATEKEEPER_PASSWORD")
+    else:
+        # Extract existing if needed
+        import dotenv
+        config = dotenv.dotenv_values(env_path)
+        gatekeeper_password = config.get("GATEKEEPER_PASSWORD")
+
+    # 3. Gatekeeper Hash
+    if "GATEKEEPER_HASH=" not in content and gatekeeper_password:
+        logger.info("Generating bcrypt hash for Gatekeeper...")
+        try:
+            # Generate salt and hash
+            # Caddy expects standard bcrypt hash.
+            # Python bcrypt generates b'$2b$...', we need string.
+            salt = bcrypt.gensalt()
+            hashed = bcrypt.hashpw(gatekeeper_password.encode('utf-8'), salt)
+            hash_str = hashed.decode('utf-8')
+            
+            # Escape $ signs for docker-compose/shell if needed? 
+            # Usually .env handles it, but docker-compose might interpolate. 
+            # Single quotes usually safe.
+            updates.append(f"GATEKEEPER_HASH='{hash_str}'")
+            logger.info("Generated GATEKEEPER_HASH")
+        except Exception as e:
+            logger.error(f"Failed to generate hash: {e}")
+            sys.exit(1)
+
+    if updates:
+        with open(env_path, "a") as f:
+            f.write("\n" + "\n".join(updates) + "\n")
+        logger.success(f"Updated {env_path} with new credentials")
+
+def ensure_credentials():
+    """Ensure security credentials exist in gpu-node/.env."""
+    import secrets
+    import subprocess
+    
+    env_path = Path("gpu-node/.env")
+    if not env_path.exists():
+        logger.error(f"Environment file not found: {env_path}")
+        sys.exit(1)
+        
+    content = env_path.read_text()
+    updates = []
+    
+    # 1. WebUI Admin Password
+    if "WEBUI_ADMIN_PASSWORD=" not in content:
+        password = secrets.token_urlsafe(16)
+        updates.append(f"WEBUI_ADMIN_PASSWORD={password}")
+        logger.info("Generated new WEBUI_ADMIN_PASSWORD")
+        
+    # 2. Gatekeeper Password
+    gatekeeper_password = None
+    if "GATEKEEPER_PASSWORD=" not in content:
+        gatekeeper_password = secrets.token_urlsafe(16)
+        updates.append(f"GATEKEEPER_PASSWORD={gatekeeper_password}")
+        logger.info("Generated new GATEKEEPER_PASSWORD")
+    else:
+        # Extract existing if needed (parsing simple env file manually for robustness)
+        import dotenv
+        config = dotenv.dotenv_values(env_path)
+        gatekeeper_password = config.get("GATEKEEPER_PASSWORD")
+
+    # 3. Gatekeeper Hash
+    if "GATEKEEPER_HASH=" not in content and gatekeeper_password:
+        logger.info("Generating bcrypt hash for Gatekeeper...")
+        try:
+            # Use docker to generate hash since we don't have bcrypt
+            result = subprocess.run(
+                ["docker", "run", "--rm", "caddy:alpine", "caddy", "hash-password", "--plaintext", gatekeeper_password],
+                capture_output=True, text=True, check=True
+            )
+            hash_val = result.stdout.strip()
+            updates.append(f"GATEKEEPER_HASH='{hash_val}'")
+            logger.info("Generated GATEKEEPER_HASH")
+        except Exception as e:
+            logger.error(f"Failed to generate hash using docker: {e}")
+            sys.exit(1)
+
+    if updates:
+        with open(env_path, "a") as f:
+            f.write("\n" + "\n".join(updates) + "\n")
+        logger.success(f"Updated {env_path} with new credentials")
+
+
 def main():
     """Main entry point."""
     import argparse
@@ -126,8 +237,14 @@ def main():
     
     # Deploy command
     deploy_parser = subparsers.add_parser("deploy", help="Deploy GPU nodes")
-    deploy_parser.add_argument("username", help="Username for remote setup")
+    deploy_parser.add_argument("username", nargs="?", help="Username for remote setup (defaults to SSH_USER env var)")
     deploy_parser.add_argument("--ips", help="Path to file containing IP addresses (disables discovery)")
+
+    # Sync Models Command
+    sync_parser = subparsers.add_parser("sync-models", help="Sync models from a source node to all others")
+    sync_parser.add_argument("username", nargs="?", help="Username for remote setup (defaults to SSH_USER env var)")
+    sync_parser.add_argument("--source", required=True, help="IP address of the source node")
+    sync_parser.add_argument("--ips", help="Path to file containing IP addresses (disables discovery)")
     
     # Open Port Command
     open_port_parser = subparsers.add_parser("open-port", help="Open a port in the cloud firewall")
@@ -175,6 +292,14 @@ def main():
         
         setup_logging()
         
+        # Load env vars to get SSH_USER if needed
+        ConfigLoader.load_env_file()
+        
+        username = args.username or os.getenv("SSH_USER")
+        if not username:
+             logger.error("Username not provided and SSH_USER environment variable not set.")
+             sys.exit(1)
+
         cloud_api = None
         # Always try to initialize Cloud API for smart features (auto-resume/reverse lookup)
         try:
@@ -191,9 +316,43 @@ def main():
         
         manager = DeploymentManager(cloud_api)
         try:
-            asyncio.run(manager.deploy_all(args.username, args.ips))
+            asyncio.run(manager.deploy_all(username, args.ips))
         except Exception as e:
             logger.error(f"Deployment failed: {e}")
+            sys.exit(1)
+
+    elif args.command == "sync-models":
+        import asyncio
+        from gpumanager.deployment import DeploymentManager
+        from gpumanager.sync import ModelSynchronizer
+
+        setup_logging()
+
+        # Load env vars to get SSH_USER if needed
+        ConfigLoader.load_env_file()
+        
+        username = args.username or os.getenv("SSH_USER")
+        if not username:
+             logger.error("Username not provided and SSH_USER environment variable not set.")
+             sys.exit(1)
+
+        # Initialize API same as deploy
+        cloud_api = None
+        try:
+            config = ConfigLoader.load_config()
+            cloud_api = CloudAPI(config.cloud_api)
+        except Exception:
+            if not args.ips:
+                 logger.error("Cloud API init failed and no IPs file provided.")
+                 sys.exit(1)
+
+        manager = DeploymentManager(cloud_api)
+        synchronizer = ModelSynchronizer(manager)
+
+        try:
+            asyncio.run(synchronizer.sync_and_deploy(args.source, username, args.ips))
+        except Exception as e:
+            logger.error(f"Sync failed: {e}")
             sys.exit(1)
 
     elif args.command == "open-port":

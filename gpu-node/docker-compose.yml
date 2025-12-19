@@ -10,7 +10,7 @@ services:
       - ./entrypoint.sh:/entrypoint.sh
     entrypoint: [ "/bin/bash", "/entrypoint.sh" ]
     environment:
-      - OLLAMA_MODELS=llama3.1:8b-instruct-q8_0
+      - OLLAMA_MODELS=${OLLAMA_MODELS}
     deploy:
       resources:
         reservations:
@@ -19,5 +19,33 @@ services:
               count: all
               capabilities: [ gpu ]
 
+  webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: always
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - ENABLE_SIGNUP=true
+    volumes:
+      - open-webui_data:/app/backend/data
+    depends_on:
+      - ollama
+
+  caddy:
+    image: caddy:alpine
+    container_name: caddy
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      - GATEKEEPER_HASH=${GATEKEEPER_HASH}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+    depends_on:
+      - webui
+
 volumes:
   ollama_data:
+  open-webui_data:
+  caddy_data:

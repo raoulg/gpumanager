@@ -157,6 +157,22 @@ else
     curl -fsSL "$BASE_URL/entrypoint.sh" -o entrypoint.sh
 fi
 
+# Handle .env
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    echo "Using local .env..."
+    if [ "$SHARED_SETUP" = true ]; then
+        if [ "$SCRIPT_DIR/.env" != "/srv/shared/.env" ]; then
+            cp "$SCRIPT_DIR/.env" /srv/shared/
+        fi
+    fi
+else
+    # If no .env exists locally, check if we can download it (unlikely for secrets/dynamic config, but for consistency)
+    # Actually for .env with MODEL list, it might be in the repo or generated.
+    # For now, if missing locally, we skip.
+    echo "No .env found locally."
+fi
+
+
 # Make entrypoint executable (required for mounting)
 chmod +x entrypoint.sh
 

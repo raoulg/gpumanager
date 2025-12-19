@@ -1,0 +1,10 @@
+:8080 {
+    # Basic Auth Gatekeeper
+    basicauth / {
+        # Username "gatekeeper", password hash provided by env var
+        gatekeeper {$GATEKEEPER_HASH}
+    }
+
+    # Proxy to OpenWebUI
+    reverse_proxy open-webui:8080
+}
