@@ -172,14 +172,68 @@ class CloudAPI:
         )
         return False
 
+    async def get_existing_mutable_rules(self, workspace_id: str) -> List[str]:
+        """Get existing mutable NSG rules from a workspace."""
+        # Get the raw response from the API to access all fields
+        endpoint = f"/workspace/workspaces/{workspace_id}/"
+        response_data = await self._make_request("GET", endpoint)
+
+        # Extract rules directly from the raw response
+        rules = response_data.get('network_security_group_rules', [])
+
+        logger.debug(f"Raw NSG rules from API: {rules}")
+
+        if not rules:
+            logger.warning(f"No network_security_group_rules found in API response for workspace {workspace_id}")
+            return []
+
+        # Extract only mutable rules (without the 'mutable' suffix)
+        mutable_rules = []
+        for rule in rules:
+            if rule.endswith(' mutable'):
+                # Remove the ' mutable' suffix to get the base rule
+                base_rule = rule.rsplit(' mutable', 1)[0]
+                mutable_rules.append(base_rule)
+                logger.debug(f"Found mutable rule: {base_rule}")
+
+        return mutable_rules
+
+    async def add_nsg_rules(self, workspace_id: str, new_rules: List[str], name: Optional[str] = None) -> ActionResponse:
+        """Add NSG rules while preserving existing mutable rules.
+
+        This method:
+        1. Fetches existing mutable rules
+        2. Combines them with new rules (avoiding duplicates)
+        3. Updates the NSGs with the combined set
+        """
+        log_name = name if name else workspace_id
+
+        # Get existing rules
+        existing_rules = await self.get_existing_mutable_rules(workspace_id)
+        logger.info(f"Found {len(existing_rules)} existing mutable rules for {log_name}")
+
+        # Combine rules, avoiding duplicates
+        combined_rules = list(existing_rules)  # Start with existing
+        for rule in new_rules:
+            if rule not in combined_rules:
+                combined_rules.append(rule)
+                logger.info(f"Adding new rule: {rule}")
+
+        logger.info(f"Total rules after merge: {len(combined_rules)}")
+
+        # Use the existing update_nsgs method with combined rules
+        return await self.update_nsgs(workspace_id, combined_rules, name)
+
     async def update_nsgs(self, workspace_id: str, custom_rules: List[str], name: Optional[str] = None) -> ActionResponse:
         """Update Network Security Groups for a workspace.
-        
+
         Note: SURF Research Cloud has mandatory immutable rules. This method handles
         appending the 'immutable' suffix to mandatory rules and 'mutable' to custom rules.
+
+        WARNING: This replaces all mutable rules. Use add_nsg_rules() to preserve existing rules.
         """
         endpoint = f"/workspace/workspaces/{workspace_id}/actions/update_nsgs/"
-        
+
         # Mandatory rules provided by SURF documentation/support
         mandatory_rules = [
             "in tcp 443 443 0.0.0.0/0 immutable",
@@ -196,19 +250,19 @@ class CloudAPI:
 
         # Format custom rules with 'mutable' suffix
         formatted_custom_rules = [f"{rule} mutable" for rule in custom_rules]
-        
+
         full_rules = mandatory_rules + formatted_custom_rules
-        
+
         payload = {
             "network_security_group_rules": full_rules
         }
-        
+
         log_name = name if name else workspace_id
         logger.info(f"Updating NSGs for workspace {log_name} with {len(formatted_custom_rules)} custom rules")
-        
+
         response_data = await self._make_request("POST", endpoint, json_data=payload)
         action_response = ActionResponse(**response_data)
-        
+
         return action_response
 
     async def discover_gpu_workspaces(self) -> List[Workspace]:

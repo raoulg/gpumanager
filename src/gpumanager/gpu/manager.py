@@ -436,6 +436,11 @@ class GPUManager:
         self._background_tasks.add(reservation_cleanup_task)
         reservation_cleanup_task.add_done_callback(self._background_tasks.discard)
 
+        # Task to sync status with Cloud
+        status_sync_task = asyncio.create_task(self._status_sync_loop())
+        self._background_tasks.add(status_sync_task)
+        status_sync_task.add_done_callback(self._background_tasks.discard)
+
         logger.info("Started background monitoring tasks")
 
     async def _idle_monitor_loop(self) -> None:
@@ -471,6 +476,56 @@ class GPUManager:
 
             except Exception as e:
                 logger.error(f"Error in reservation cleanup loop: {e}")
+                await asyncio.sleep(30)
+
+    async def _status_sync_loop(self) -> None:
+        """Periodically sync GPU status with Cloud API."""
+        while not self._shutdown:
+            try:
+                # Poll cloud status
+                workspaces = await self.cloud_api.discover_gpu_workspaces()
+                workspace_map = {w.id: w for w in workspaces}
+                
+                for gpu_id, gpu in self.gpus.items():
+                    if gpu_id not in workspace_map:
+                        # GPU disappeared? Mark error
+                        if gpu.status != GPUModelStatus.ERROR:
+                            logger.warning(f"GPU {gpu.name} not found in cloud sync, marking ERROR")
+                            gpu.update_status(GPUModelStatus.ERROR)
+                        continue
+                        
+                    cloud_ws = workspace_map[gpu_id]
+                    cloud_status = self._map_workspace_status(cloud_ws.status)
+                    
+                    # Reconciliation Logic
+                    
+                    # 1. Cloud says PAUSED
+                    if cloud_status == GPUModelStatus.PAUSED:
+                        if gpu.status not in [GPUModelStatus.PAUSED, GPUModelStatus.PAUSING]:
+                            logger.info(f"Sync: GPU {gpu.name} is PAUSED in cloud, updating local status.")
+                            gpu.update_status(GPUModelStatus.PAUSED)
+                            gpu.update_model(None)
+                            
+                    # 2. Cloud says IDLE (Running)
+                    elif cloud_status == GPUModelStatus.IDLE:
+                        # If local is PAUSED/ERROR/STARTING, we can promote to IDLE
+                        # But if local is BUSY or MODEL_READY, we keep that (as it's a sub-state of RUNNING)
+                        if gpu.status in [GPUModelStatus.PAUSED, GPUModelStatus.ERROR, GPUModelStatus.STARTING]:
+                            # Verify Ollama is actually ready before fully trusting RUNNING?
+                            # For now, trust cloud, but maybe trigger a check?
+                            logger.info(f"Sync: GPU {gpu.name} is RUNNING in cloud, updating local status to IDLE")
+                            gpu.update_status(GPUModelStatus.IDLE)
+                            
+                    # 3. Cloud says STARTING (Resuming)
+                    elif cloud_status == GPUModelStatus.STARTING:
+                        if gpu.status != GPUModelStatus.STARTING:
+                             gpu.update_status(GPUModelStatus.STARTING)
+
+                # Sync every 30 seconds
+                await asyncio.sleep(30)
+
+            except Exception as e:
+                logger.error(f"Error in status sync loop: {e}")
                 await asyncio.sleep(30)
 
     async def shutdown(self) -> None:

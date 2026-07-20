@@ -21,14 +21,17 @@ from gpumanager.api.middleware import (
     create_auth_dependency,
     create_optional_auth_dependency,
 )
+from datetime import datetime
 from gpumanager.api.ollama_models import (
     OllamaChatRequest,
     OllamaGenerateRequest,
     OpenAIChatRequest,
+    OllamaListResponse,
+    OllamaPullRequest,
 )
 from gpumanager.api.ollama_proxy import OllamaProxy
 from gpumanager.auth.manager import APIKeyManager
-from gpumanager.auth.models import AuthenticatedUser
+from gpumanager.auth.models import AuthenticatedUser, UserInfo
 from gpumanager.cloud.api import CloudAPI
 from gpumanager.gpu.manager import GPUManager
 from gpumanager.gpu.models import GPUManagerStats
@@ -89,6 +92,17 @@ class RequestHandler:
             "Initialized RequestHandler with GPU management, authentication, and Ollama proxy"
         )
 
+    def _get_anonymous_user(self) -> AuthenticatedUser:
+        """Create an anonymous user context."""
+        return AuthenticatedUser(
+            api_key="none",
+            user_info=UserInfo(
+                name="anonymous", 
+                email="anonymous@local", 
+                created=datetime.now().strftime("%Y-%m-%d")
+            )
+        )
+
     def _create_app(self) -> FastAPI:
         """Create FastAPI application."""
         app = FastAPI(
@@ -129,7 +143,10 @@ class RequestHandler:
         # Ollama proxy routes (require authentication)
         app.post("/api/generate")(self._create_ollama_generate_handler())
         app.post("/api/chat")(self._create_ollama_chat_handler())
+        app.post("/api/pull")(self._create_pull_handler())
         app.post("/v1/chat/completions")(self._create_openai_chat_handler())
+        # Aggregated model listing
+        app.get("/api/tags", response_model=OllamaListResponse)(self._create_list_models_handler())
         # Passthrough for all other Ollama endpoints (also requires authentication)
         app.api_route(
             "/api/{path:path}",
@@ -310,10 +327,11 @@ class RequestHandler:
 
         async def ollama_generate(
             request: OllamaGenerateRequest,
-            current_user: AuthenticatedUser = Depends(self.get_current_user),
+            current_user: Optional[AuthenticatedUser] = Depends(self.get_optional_user),
         ) -> StreamingResponse:
             """Ollama generate endpoint with intelligent GPU routing."""
-            return await self.ollama_proxy.generate(request, current_user)
+            user = current_user or self._get_anonymous_user()
+            return await self.ollama_proxy.generate(request, user)
 
         return ollama_generate
 
@@ -322,26 +340,52 @@ class RequestHandler:
 
         async def ollama_chat(
             request: OllamaChatRequest,
-            current_user: AuthenticatedUser = Depends(self.get_current_user),
+            current_user: Optional[AuthenticatedUser] = Depends(self.get_optional_user),
         ) -> StreamingResponse:
             """Ollama chat endpoint with intelligent GPU routing."""
-            return await self.ollama_proxy.chat(request, current_user)
+            user = current_user or self._get_anonymous_user()
+            return await self.ollama_proxy.chat(request, user)
 
         return ollama_chat
+
+    def _create_pull_handler(self):
+        """Create Ollama pull handler with proper dependency injection."""
+        
+        async def ollama_pull(
+            request: OllamaPullRequest,
+            current_user: Optional[AuthenticatedUser] = Depends(self.get_optional_user),
+        ) -> StreamingResponse:
+            """Ollama pull endpoint with broadcast to all GPUs."""
+            user = current_user or self._get_anonymous_user()
+            return await self.ollama_proxy.pull_model(request, user)
+
+        return ollama_pull
 
     def _create_openai_chat_handler(self):
         """Create OpenAI chat handler with proper dependency injection."""
 
         async def openai_chat_completions(
             request: OpenAIChatRequest,
-            current_user: AuthenticatedUser = Depends(self.get_current_user),
+            current_user: Optional[AuthenticatedUser] = Depends(self.get_optional_user),
         ) -> StreamingResponse:
             """OpenAI-compatible chat completions endpoint."""
+            user = current_user or self._get_anonymous_user()
             return await self.ollama_proxy.openai_chat_completions(
-                request, current_user
+                request, user
             )
 
         return openai_chat_completions
+
+    def _create_list_models_handler(self):
+        """Create list models handler with proper dependency injection."""
+
+        async def list_models(
+            current_user: Optional[AuthenticatedUser] = Depends(self.get_optional_user),
+        ) -> OllamaListResponse:
+            """List models from all available GPUs."""
+            return await self.ollama_proxy.list_models()
+
+        return list_models
 
     def _create_passthrough_handler(self):
         """Create passthrough handler with proper dependency injection."""
@@ -349,10 +393,11 @@ class RequestHandler:
         async def ollama_passthrough(
             request: Request,
             path: str = Path(...),
-            current_user: AuthenticatedUser = Depends(self.get_current_user),
+            current_user: Optional[AuthenticatedUser] = Depends(self.get_optional_user),
         ):
             """Pass-through proxy for any Ollama API endpoint (authenticated)."""
-            return await self._ollama_passthrough_impl(request, path, current_user)
+            user = current_user or self._get_anonymous_user()
+            return await self._ollama_passthrough_impl(request, path, user)
 
         return ollama_passthrough
 

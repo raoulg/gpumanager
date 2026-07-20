@@ -157,29 +157,7 @@ else
     curl -fsSL "$BASE_URL/entrypoint.sh" -o entrypoint.sh
 fi
 
-# Handle Caddyfile
-if [ -f "$SCRIPT_DIR/Caddyfile" ]; then
-    echo "Using local Caddyfile..."
-    if [ "$SHARED_SETUP" = true ]; then
-        if [ "$SCRIPT_DIR/Caddyfile" != "/srv/shared/Caddyfile" ]; then
-            # Fix: If Docker created a dir here by mistake, remove it
-            if [ -d "/srv/shared/Caddyfile" ]; then
-                echo "Removing stuck Caddyfile directory..."
-                rm -rf "/srv/shared/Caddyfile"
-            fi
-            cp "$SCRIPT_DIR/Caddyfile" /srv/shared/
-        fi
-    fi
-else
-    echo "Downloading Caddyfile..."
-    # If downloading, also ensure target isn't a dir
-    if [ -d "Caddyfile" ]; then
-         rm -rf "Caddyfile"
-    fi
-    curl -fsSL "$BASE_URL/Caddyfile" -o Caddyfile
-fi
-
-# Handle .env
+# Handle .env (for OLLAMA_MODELS configuration)
 if [ -f "$SCRIPT_DIR/.env" ]; then
     echo "Using local .env..."
     if [ "$SHARED_SETUP" = true ]; then
@@ -188,10 +166,7 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
         fi
     fi
 else
-    # If no .env exists locally, check if we can download it (unlikely for secrets/dynamic config, but for consistency)
-    # Actually for .env with MODEL list, it might be in the repo or generated.
-    # For now, if missing locally, we skip.
-    echo "No .env found locally."
+    echo "No .env found locally. Using default Ollama settings."
 fi
 
 

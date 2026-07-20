@@ -77,9 +77,9 @@ class DeploymentManager:
         cmd = f"echo '{step_marker}' | sudo tee -a /srv/shared/.setup_progress"
         await self.run_remote_command(ip, cmd, f"Marking step {step_marker} as complete")
 
-    async def deploy_node(self, ip: str, workspace_name: str, username: str):
-        """Deploy software to a single node."""
-        logger.info(f"Starting deployment for {workspace_name} ({ip})")
+    async def deploy_gpu_node(self, ip: str, workspace_name: str, username: str):
+        """Deploy Ollama to a GPU node."""
+        logger.info(f"Starting GPU node deployment for {workspace_name} ({ip})")
 
         # 1. Wait for SSH availability
         if not await self.wait_for_ssh(ip):
@@ -95,20 +95,18 @@ class DeploymentManager:
 
         # 3. Copy Files
         logger.info(f"[{workspace_name}] Copying installation files...")
-        # Assume we are running from project root, or we need to find the files relative to this package
-        # Better: use project root relative paths assuming CWD is project root (standard for CLI)
-        # OR find resources relative to package. For now assuming CWD is project root.
         project_root = Path.cwd()
         gpu_node_dir = project_root / "gpu-node"
-        
+
         if not gpu_node_dir.exists():
             logger.error(f"Could not find gpu-node directory at {gpu_node_dir}")
             return
 
+        # GPU nodes only need Ollama files (no Caddy, no .env for passwords)
         files_to_copy = [
-            "docker-compose.yml", "entrypoint.sh", "setup.sh", "install-docker.sh", ".env", "Caddyfile"
+            "docker-compose.yml", "entrypoint.sh", "setup.sh", "install-docker.sh", ".env"
         ]
-        
+
         scp_args = []
         for f in files_to_copy:
             file_path = gpu_node_dir / f
@@ -118,11 +116,11 @@ class DeploymentManager:
             scp_args.append(str(file_path))
 
         scp_cmd = [
-            "scp", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", 
+            "scp", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
             *scp_args,
             f"{ip}:{REMOTE_DIR}/"
         ]
-        
+
         proc = await asyncio.create_subprocess_exec(*scp_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
         _, stderr = await proc.communicate()
         if proc.returncode != 0:
@@ -130,19 +128,6 @@ class DeploymentManager:
              return
 
         # 4. Run Setup
-        # We ALWAYS run setup to ensure configuration changes (docker-compose, env vars) are applied.
-        # The setup.sh script is idempotent.
-        
-        # Robust wipe of OpenWebUI data (preserving Ollama models)
-        # We explicitly stop and remove the webui container first to unlock the volume.
-        wipe_cmd = (
-            "docker compose stop webui && "
-            "docker compose rm -f webui && "
-            "docker volume rm shared_open-webui_data || true"
-        )
-        logger.info(f"[{workspace_name}] Wiping OpenWebUI data (preserving models)...")
-        await self.run_remote_command(ip, wipe_cmd, "Wiping OpenWebUI data", log_name=workspace_name)
-
         logger.info(f"[{workspace_name}] Running setup script...")
         if await self.run_remote_command(ip, f"cd {REMOTE_DIR} && {SETUP_CMD}", log_name=workspace_name):
              await self.mark_remote_progress(ip, "SETUP_COMPLETED")
@@ -151,14 +136,154 @@ class DeploymentManager:
              logger.error(f"[{workspace_name}] Setup script failed.")
              return
 
-        # 5. Verify Service
-        if await self.run_remote_command(ip, "curl -s localhost:11434 > /dev/null", "Verifying service health", log_name=workspace_name):
-            logger.success(f"[{workspace_name}] Service is UP and responding!")
+        # 5. Verify Ollama Service
+        if await self.run_remote_command(ip, "curl -s localhost:11434 > /dev/null", "Verifying Ollama health", log_name=workspace_name):
+            logger.success(f"[{workspace_name}] Ollama is UP and responding!")
         else:
-            logger.warning(f"[{workspace_name}] Service does not seem to be responding on port 11434.")
+            logger.warning(f"[{workspace_name}] Ollama does not seem to be responding on port 11434.")
+
+        # Cleanup
+        REMOTE_DIR = "~/gpu-node-install"
+        await self.run_remote_command(ip, f"rm -rf {REMOTE_DIR}", "Cleaning up remote directory", log_name=workspace_name)
+
+    async def deploy_manager_node(self, ip: str, manager_name: str, username: str, workspace_id: Optional[str] = None, with_api: bool = False):
+        """Deploy OpenWebUI to the manager node."""
+        logger.info(f"Starting manager node deployment for {manager_name} ({ip})")
+
+        # 1. Wait for SSH availability
+        if not await self.wait_for_ssh(ip):
+            logger.error(f"[{manager_name}] SSH not available after timeout. Skipping.")
+            return
+
+        # 2. Open ports for WebUI (8080) and optionally API (8000)
+        if workspace_id and self.cloud_api:
+            try:
+                ports_to_open = ["in tcp 8080 8080 0.0.0.0/0"]
+                if with_api:
+                    ports_to_open.append("in tcp 8000 8000 0.0.0.0/0")
+
+                logger.info(f"[{manager_name}] Opening ports in firewall...")
+                await self.cloud_api.add_nsg_rules(workspace_id, ports_to_open, name=manager_name)
+            except Exception as e:
+                logger.warning(f"[{manager_name}] Failed to open ports: {e}")
+
+        # 3. Setup Remote Environment
+        REMOTE_DIR = "~/manager-node-install"
+        SETUP_CMD = f"sudo bash setup.sh --shared --user {username}"
+
+        if not await self.run_remote_command(ip, f"mkdir -p {REMOTE_DIR}", "Creating remote directory", log_name=manager_name):
+            return
+
+        # 3. Copy Files
+        logger.info(f"[{manager_name}] Copying installation files...")
+        project_root = Path.cwd()
+        manager_node_dir = project_root / "manager-node"
+
+        if not manager_node_dir.exists():
+            logger.error(f"Could not find manager-node directory at {manager_node_dir}")
+            return
+
+        files_to_copy = [
+            "docker-compose.yml", "setup.sh", ".env", "Caddyfile"
+        ]
+
+        # If deploying with API, also copy source code and config
+        if with_api:
+            logger.info(f"[{manager_name}] Preparing GPU Manager API files...")
+
+            # Additional files for API deployment
+            files_to_copy.extend(["config.toml", "pyproject.toml", "README.md"])
+
+            # Create a tarball of the source code
+            import tarfile
+            import tempfile
+
+            src_dir = project_root / "src"
+            if not src_dir.exists():
+                logger.error(f"Could not find src directory at {src_dir}")
+                return
+
+            with tempfile.NamedTemporaryFile(suffix='.tar.gz', delete=False) as tmp:
+                tar_path = tmp.name
+                with tarfile.open(tar_path, 'w:gz') as tar:
+                    tar.add(src_dir, arcname='src')
+
+                files_to_copy.append(tar_path)
+
+        scp_args = []
+        for f in files_to_copy:
+            if f.endswith('.tar.gz'):
+                file_path = Path(f)
+            else:
+                file_path = manager_node_dir / f if f in ["docker-compose.yml", "setup.sh", ".env", "Caddyfile"] else project_root / f
+
+            if not file_path.exists():
+                logger.warning(f"Optional file not found: {file_path}, skipping")
+                continue
+            scp_args.append(str(file_path))
+
+        if not scp_args:
+            logger.error(f"[{manager_name}] No files to copy")
+            return
+
+        scp_cmd = [
+            "scp", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+            *scp_args,
+            f"{ip}:{REMOTE_DIR}/"
+        ]
+
+        proc = await asyncio.create_subprocess_exec(*scp_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+             logger.error(f"[{manager_name}] SCP failed: {stderr.decode()}")
+             return
+
+        # Extract source code and prepare files if with_api
+        if with_api:
+            # Extract source code
+            extract_cmd = f"cd {REMOTE_DIR} && tar -xzf *.tar.gz && rm *.tar.gz"
+            await self.run_remote_command(ip, extract_cmd, "Extracting source code", log_name=manager_name)
+
+            # Copy files that docker-compose will need to /srv/shared BEFORE running docker compose
+            # This prevents Docker from creating directories instead of mounting files
+            # Also copy src directory recursively
+            copy_cmd = (
+                f"cd {REMOTE_DIR} && "
+                f"sudo cp config.toml pyproject.toml README.md .env /srv/shared/ 2>/dev/null || true && "
+                f"sudo cp -r src /srv/shared/ 2>/dev/null || true"
+            )
+            await self.run_remote_command(ip, copy_cmd, "Copying API configuration and source files", log_name=manager_name)
+
+            # Cleanup local tar file
+            import os
+            for f in files_to_copy:
+                if f.endswith('.tar.gz'):
+                    os.remove(f)
+
+        # 4. Wipe OpenWebUI data (for clean deployment)
+        wipe_cmd = (
+            "cd /srv/shared && "
+            "docker compose stop webui && "
+            "docker compose rm -f webui && "
+            "docker volume rm shared_open-webui_data || true"
+        )
+        logger.info(f"[{manager_name}] Wiping OpenWebUI data for fresh install...")
+        await self.run_remote_command(ip, wipe_cmd, "Wiping OpenWebUI data", log_name=manager_name)
+
+        # 5. Run Setup
+        logger.info(f"[{manager_name}] Running setup script...")
+        if await self.run_remote_command(ip, f"cd {REMOTE_DIR} && {SETUP_CMD}", log_name=manager_name):
+             await self.mark_remote_progress(ip, "SETUP_COMPLETED")
+             logger.success(f"[{manager_name}] Setup script completed successfully.")
+        else:
+             logger.error(f"[{manager_name}] Setup script failed.")
+             return
 
         # 6. Provision Admin User
-        await self.provision_admin_user(ip, "http", log_name=workspace_name) # Using http as Caddy on 8080 is http by default for IP access.
+        await self.provision_admin_user(ip, "http", log_name=manager_name)
+
+        # Cleanup
+        await self.run_remote_command(ip, f"rm -rf {REMOTE_DIR}", "Cleaning up remote directory", log_name=manager_name)
         
     async def provision_admin_user(self, ip: str, scheme: str = "http", log_name: Optional[str] = None):
         """Provision the admin user if not exists."""
@@ -274,16 +399,14 @@ class DeploymentManager:
             # Using 0.0.0.0/0 as verified by user curl.
             try:
                 logger.info(f"Configuring NSGs for {ws.name}...")
-                await self.cloud_api.update_nsgs(ws.id, [
+                await self.cloud_api.add_nsg_rules(ws.id, [
                     "in tcp 11434 11434 0.0.0.0/0",
-                    "in tcp 8080 8080 0.0.0.0/0",
-                    "out tcp 8080 8080 0.0.0.0/0"
                 ], name=ws.name)
             except Exception as e:
                 logger.error(f"Failed to update NSGs for {ws.name}: {e}")
                 # We don't return here because deployment might still work if ports were already open manually
-                
-            await self.deploy_node(target_ip, ws.name, username)
+
+            await self.deploy_gpu_node(target_ip, ws.name, username)
         
         except Exception as e:
             logger.error(f"Error processing workspace {ws.name}: {e}")
@@ -336,7 +459,7 @@ class DeploymentManager:
                      else:
                          logger.info(f"Added manual target: {ip} (No Cloud Workspace match found)")
                          # Increase timeout for manual/unknown nodes as they might differ
-                         tasks.append(self.deploy_node(ip, f"Manual-{ip}", username))
+                         tasks.append(self.deploy_gpu_node(ip, f"Manual-{ip}", username))
              
              if tasks:
                  await asyncio.gather(*tasks)

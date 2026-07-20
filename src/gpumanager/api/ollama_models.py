@@ -1,5 +1,6 @@
 """Ollama API request/response models."""
 
+from datetime import datetime
 from typing import Dict, List, Optional, Any, Union
 from pydantic import BaseModel, Field, ConfigDict
 
@@ -39,6 +40,14 @@ class OllamaMessage(BaseModel):
     images: Optional[List[str]] = Field(
         default=None, description="Base64 encoded images"
     )
+
+
+class OllamaPullRequest(BaseModel):
+    """Ollama /api/pull request model."""
+
+    name: str = Field(description="Name of the model to pull")
+    insecure: bool = Field(default=False, description="Allow insecure connections")
+    stream: bool = Field(default=True, description="Whether to stream the response")
 
 
 class OllamaChatRequest(BaseModel):
@@ -129,3 +138,31 @@ class GPURoutingInfo(BaseModel):
         description="Estimated time to load model (seconds)"
     )
     reasoning: str = Field(description="Why this GPU was selected")
+
+
+class OllamaModelDetails(BaseModel):
+    """Details about a model."""
+
+    parent_model: str = Field(default="", description="Parent model name")
+    format: str = Field(default="gguf", description="Model format")
+    family: str = Field(default="", description="Model family")
+    families: List[str] = Field(default_factory=list, description="Model families")
+    parameter_size: str = Field(default="", description="Parameter size")
+    quantization_level: str = Field(default="", description="Quantization level")
+
+
+class OllamaModelResponse(BaseModel):
+    """Model information response."""
+
+    name: str = Field(description="Model name")
+    model: str = Field(description="Model identifier")
+    modified_at: datetime = Field(description="Last modification time")
+    size: int = Field(description="Model size in bytes")
+    digest: str = Field(description="Model digest")
+    details: OllamaModelDetails = Field(description="Model details")
+
+
+class OllamaListResponse(BaseModel):
+    """Response for /api/tags."""
+
+    models: List[OllamaModelResponse] = Field(description="List of available models")

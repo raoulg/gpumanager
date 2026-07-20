@@ -1,7 +1,9 @@
 """Ollama proxy for intelligent request routing."""
 
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import asyncio
+import json
+from datetime import datetime
 import httpx
 from fastapi import HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -10,13 +12,16 @@ from loguru import logger
 
 from gpumanager.gpu.manager import GPUManager
 from gpumanager.gpu.models import GPUSelectionRequest
-from gpumanager.gpu.state import GPUModelStatus, ModelInfo
+from gpumanager.gpu.state import GPUModelStatus, ModelInfo, GPUInfo
 from gpumanager.auth.models import AuthenticatedUser
 from .ollama_models import (
     OllamaGenerateRequest,
     OllamaChatRequest,
-    OpenAIChatRequest,
     OllamaMessage,
+    OpenAIChatRequest,
+    OllamaListResponse,
+    OllamaModelResponse,
+    OllamaPullRequest,
 )
 
 
@@ -30,6 +35,199 @@ class OllamaProxy:
         self.active_user_requests: Dict[str, asyncio.Lock] = {}
         self.user_request_timeout = 120  # 2 minutes timeout for queued requests
         logger.info("Initialized OllamaProxy")
+
+    async def list_models(self) -> OllamaListResponse:
+        """List models aggregated from all available GPUs."""
+        all_models: Dict[str, OllamaModelResponse] = {}
+
+        gpu_manager = self.gpu_manager
+        active_gpus = []
+        paused_gpus = []
+
+        for gpu in gpu_manager.gpus.values():
+            if gpu.status not in [GPUModelStatus.ERROR, GPUModelStatus.PAUSED, GPUModelStatus.STARTING]:
+                if gpu.ip_address:
+                    active_gpus.append(gpu)
+            elif gpu.status == GPUModelStatus.PAUSED:
+                paused_gpus.append(gpu)
+
+        # Auto-wake logic: If no active GPUs, wake one up and WAIT for it
+        if not active_gpus and paused_gpus:
+            # Pick the most recently used one if possible
+            target_gpu = sorted(paused_gpus, key=lambda g: g.last_request or datetime.min, reverse=True)[0]
+            logger.info(f"No active GPUs found for list_models. Auto-waking {target_gpu.name} and waiting...")
+
+            # Start GPU and wait for it to become ready
+            success = await gpu_manager.start_gpu(target_gpu.gpu_id)
+
+            if success:
+                # Add to active GPUs so we can fetch its models
+                active_gpus.append(target_gpu)
+                logger.info(f"GPU {target_gpu.name} is now ready, will fetch models from it")
+            else:
+                logger.error(f"Failed to wake up {target_gpu.name}, returning empty model list")
+                return OllamaListResponse(models=[])
+
+        logger.info(f"Aggregating models from {len(active_gpus)} active GPUs...")
+        async def fetch_models(gpu_ip: str, gpu_name: str) -> List[OllamaModelResponse]:
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    response = await client.get(f"http://{gpu_ip}:11434/api/tags")
+                    if response.status_code == 200:
+                        data = response.json()
+                        models = []
+                        for m in data.get("models", []):
+                            try:
+                                models.append(OllamaModelResponse(**m))
+                            except Exception as e:
+                                logger.warning(f"Failed to parse model from {gpu_name}: {e}")
+                        return models
+            except Exception as e:
+                logger.warning(f"Failed to fetch models from {gpu_name}: {e}")
+            return []
+
+        # Fetch from all active GPUs concurrently
+        tasks = [fetch_models(gpu.ip_address, gpu.name) for gpu in active_gpus]
+        results = await asyncio.gather(*tasks)
+
+        # Aggregate results (deduplicate by name)
+        for gpu_models in results:
+            for model in gpu_models:
+                if model.name not in all_models:
+                    all_models[model.name] = model
+
+        logger.info(f"Found {len(all_models)} unique models across {len(active_gpus)} GPUs")
+        return OllamaListResponse(models=list(all_models.values()))
+
+    async def pull_model(
+        self, request: OllamaPullRequest, current_user: Optional[Any] = None
+    ) -> StreamingResponse:
+        """
+        Pull a model on all available GPUs.
+
+        Strategically:
+        1. Access checks (optional)
+        2. Identify ALL reachable GPUs (IDLE, READY, BUSY, etc.) using /api/tags check
+        3. Pick ONE "primary" GPU to stream the response from (to show progress to user)
+        4. Trigger background pulls on ALL OTHERS (fire and forget / independent tasks)
+        5. Return stream from Primary
+        """
+        model_name = request.name
+        user_id = getattr(current_user, "name", "anonymous")
+        logger.info(f"User {user_id} requested pull for model: {model_name}")
+
+        # 1. Identify all reachable GPUs (including PAUSED/STARTING)
+        reachable_gpus: List[GPUInfo] = []
+        for gpu in self.gpu_manager.gpus.values():
+            if gpu.status != GPUModelStatus.ERROR:
+                reachable_gpus.append(gpu)
+
+        if not reachable_gpus:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="No GPUs available to pull model",
+            )
+
+        logger.info(f"Broadcasting pull to {len(reachable_gpus)} GPUs: {[g.name for g in reachable_gpus]}")
+
+        # 2. Select Primary GPU
+        # Prefer IDLE/READY/BUSY over PAUSED/STARTING
+        reachable_gpus.sort(key=lambda g: 1 if g.status in [GPUModelStatus.PAUSED, GPUModelStatus.STARTING] else 0)
+        
+        primary_gpu = reachable_gpus[0]
+        secondary_gpus = reachable_gpus[1:]
+
+        # 3. Trigger background pulls on secondary GPUs
+        for gpu in secondary_gpus:
+            asyncio.create_task(self._trigger_background_pull(gpu, request, user_id))
+
+        # 4. Stream from Primary GPU
+        return await self._stream_pull_from_gpu(primary_gpu, request, user_id)
+
+    async def _trigger_background_pull(
+        self, gpu: GPUInfo, request: OllamaPullRequest, user_id: str
+    ):
+        """Execute a pull on a secondary GPU without waiting for stream."""
+        try:
+            # Wake up GPU if needed
+            if gpu.status == GPUModelStatus.PAUSED:
+                logger.info(f"Background pull: Waking up {gpu.name}...")
+                await self.gpu_manager.start_gpu(gpu.gpu_id)
+            
+            # Wait if starting
+            if gpu.status == GPUModelStatus.STARTING:
+                logger.info(f"Background pull: Waiting for {gpu.name} startup...")
+                # Simple wait loop
+                for _ in range(60): # 2 minutes max
+                    if gpu.status not in [GPUModelStatus.PAUSED, GPUModelStatus.STARTING]:
+                        break
+                    await asyncio.sleep(2)
+            
+            if gpu.status not in [GPUModelStatus.IDLE, GPUModelStatus.MODEL_READY, GPUModelStatus.BUSY]:
+                logger.warning(f"Background pull aborted for {gpu.name}: Status is {gpu.status}")
+                return
+
+            logger.info(f"Starting background pull of {request.name} on {gpu.name}")
+            async with httpx.AsyncClient(timeout=3600.0) as client:
+                async with client.stream(
+                    "POST",
+                    f"http://{gpu.ip_address}:11434/api/pull",
+                    json=request.model_dump(),
+                ) as response:
+                    async for _ in response.aiter_bytes():
+                        pass 
+            
+            logger.info(f"Background pull of {request.name} on {gpu.name} COMPLETED")
+            
+        except Exception as e:
+            logger.error(f"Background pull of {request.name} on {gpu.name} FAILED: {e}")
+
+    async def _stream_pull_from_gpu(
+        self, gpu: GPUInfo, request: OllamaPullRequest, user_id: str
+    ) -> StreamingResponse:
+        """Stream the pull response from the primary GPU to the client."""
+        logger.info(f"Streaming pull of {request.name} from PRIMARY {gpu.name}")
+        
+        async def stream_generator():
+            try:
+                # Wake up logic with status updates
+                if gpu.status == GPUModelStatus.PAUSED:
+                    yield json.dumps({"status": f"Waking up GPU node {gpu.name}..."}).encode("utf-8") + b"\n"
+                    # Start GPU (this blocks until ready in current implementation)
+                    await self.gpu_manager.start_gpu(gpu.gpu_id)
+
+                # If still starting (or if start_gpu returned early due to race), wait
+                while gpu.status == GPUModelStatus.STARTING:
+                     yield json.dumps({"status": f"Waiting for GPU node {gpu.name} startup..."}).encode("utf-8") + b"\n"
+                     await asyncio.sleep(2)
+                     if gpu.status == GPUModelStatus.PAUSED: # Failed to start?
+                         yield json.dumps({"status": f"GPU node {gpu.name} failed to start. Aborting."}).encode("utf-8") + b"\n"
+                         return
+
+                if gpu.status not in [GPUModelStatus.IDLE, GPUModelStatus.MODEL_READY, GPUModelStatus.BUSY]:
+                     yield json.dumps({"status": f"GPU node {gpu.name} unavailable (Status: {gpu.status}). Aborting."}).encode("utf-8") + b"\n"
+                     return
+
+                # Proceed with pull
+                async with httpx.AsyncClient(timeout=3600.0) as client:
+                    async with client.stream(
+                        "POST",
+                        f"http://{gpu.ip_address}:11434/api/pull",
+                        json=request.model_dump(),
+                    ) as response:
+                        async for chunk in response.aiter_bytes():
+                            yield chunk
+                            
+                logger.info(f"Primary pull stream of {request.name} COMPLETED")
+                
+            except Exception as e:
+                logger.error(f"Primary pull stream of {request.name} FAILED: {e}")
+                raise
+
+        return StreamingResponse(
+            stream_generator(),
+            media_type="application/x-ndjson"
+        )
 
     async def _acquire_user_lock(self, user_id: str) -> asyncio.Lock:
         """Acquire a lock for a user to prevent concurrent requests.
@@ -259,12 +457,22 @@ class OllamaProxy:
                         model_info = ModelInfo(name=model_name, context_length=context_length)
                         gpu.update_model(model_info)
                         gpu.update_status(GPUModelStatus.MODEL_READY)
+                    except HTTPException as e:
+                        # Check if it's a 404 (model not found) - don't mark GPU as ERROR
+                        if e.status_code == status.HTTP_404_NOT_FOUND:
+                            logger.warning(f"Model '{model_name}' not found on {gpu.name}. GPU is healthy, model needs to be pulled.")
+                            # Clear reservation and re-raise for user
+                            gpu.clear_reservation()
+                            raise
+                        else:
+                            # Other errors indicate GPU problems
+                            logger.error(f"Failed to load model on {gpu.name}. Marking node as ERROR state.")
+                            gpu.update_status(GPUModelStatus.ERROR)
+                            raise
                     except Exception as e:
-                        logger.error(f"Failed to load model on {gpu.name}. Marking node as ERROR state.")
+                        # Unexpected errors also indicate GPU problems
+                        logger.error(f"Unexpected error loading model on {gpu.name}. Marking node as ERROR state: {e}")
                         gpu.update_status(GPUModelStatus.ERROR)
-                        # We should also clear the reservation so it doesn't expire naturally,
-                        # but status=ERROR already prevents selection.
-                        # Re-raise to stop the request
                         raise
 
                 return gpu_result
@@ -298,10 +506,21 @@ class OllamaProxy:
                 response = await client.post(
                     f"http://{gpu_ip}:11434/api/generate", json=load_request
                 )
-                if response.status_code != 200:
+                if response.status_code == 404:
+                    # Model not found - this is a user error, not a GPU error
                     error_text = response.text
                     logger.warning(
-                        f"Model loading on {gpu_name} ({gpu_ip}) returned status {response.status_code}: {error_text}"
+                        f"Model '{model_name}' not found on {gpu_name}. User should pull it first."
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Model '{model_name}' not found on GPU. Please pull the model first using /api/pull",
+                    )
+                elif response.status_code != 200:
+                    # Other errors (500, 503, etc.) indicate GPU problems
+                    error_text = response.text
+                    logger.error(
+                        f"Model loading on {gpu_name} ({gpu_ip}) failed with status {response.status_code}: {error_text}"
                     )
                     raise HTTPException(
                         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -314,10 +533,11 @@ class OllamaProxy:
             except HTTPException:
                 raise
             except Exception as e:
-                logger.error(f"Failed to load model {model_name} on {gpu_name} ({gpu_ip}): {e}")
+                # Network/connection errors indicate GPU problems
+                logger.error(f"Failed to connect to {gpu_name} ({gpu_ip}): {e}")
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail=f"Failed to load model on {gpu_name}: {e}",
+                    detail=f"Failed to connect to GPU {gpu_name}: {e}",
                 )
 
     async def _proxy_generate_request(

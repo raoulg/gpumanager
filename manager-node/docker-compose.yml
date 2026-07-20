@@ -1,0 +1,66 @@
+services:
+  gpumanager:
+    image: python:3.12-slim
+    container_name: gpumanager-server
+    restart: always
+    working_dir: /app
+    command: >
+      bash -c "
+      apt-get update && apt-get install -y git &&
+      pip install --no-cache-dir uv &&
+      uv pip install --system . &&
+      uv run gpumanager server
+      "
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./src:/app/src
+      - ./pyproject.toml:/app/pyproject.toml
+      - ./README.md:/app/README.md
+      - ./config.toml:/app/config.toml
+      - ./.env:/app/.env
+    ports:
+      - "8000:8000"
+    networks:
+      - gpumanager-net
+
+  webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: always
+    environment:
+      - ENABLE_SIGNUP=true
+      - OLLAMA_BASE_URL=http://gpumanager:8000
+      - WEBUI_NAME=GPU Manager
+    volumes:
+      - open-webui_data:/app/backend/data
+    ports:
+      - "3000:8080"
+    depends_on:
+      - gpumanager
+    networks:
+      - gpumanager-net
+
+  caddy:
+    image: caddy:alpine
+    container_name: caddy
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      - GATEKEEPER_HASH=${GATEKEEPER_HASH}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+    depends_on:
+      - webui
+    networks:
+      - gpumanager-net
+
+volumes:
+  open-webui_data:
+  caddy_data:
+
+networks:
+  gpumanager-net:
+    driver: bridge
